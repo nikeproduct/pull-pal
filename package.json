@@ -1,0 +1,19 @@
+{
+  "name": "pull-pal",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "pull-pal": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "build:sh": "bash scripts/build.sh",
+    "dev": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "publish:npm": "bun run build && bun run scripts/publish-npm.ts"
+  },
+  "devDependencies": {
+    "bun-types": "latest",
+    "typescript": "^5.0.0"
+  }
+}

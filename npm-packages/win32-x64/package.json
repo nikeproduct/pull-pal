@@ -1,0 +1,16 @@
+{
+  "name": "@judecodes/pull-pal-win32-x64",
+  "version": "0.1.0",
+  "description": "pull-pal Windows x64 binary",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "author": "judecodes",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/judecodes/pull-pal.git"
+  },
+  "files": [
+    "pull-pal.exe"
+  ]
+}

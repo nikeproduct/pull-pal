@@ -1,0 +1,109 @@
+#!/usr/bin/env bun
+/**
+ * Cross-platform build script for pull-pal.
+ * Runs on Windows, macOS, and Linux (unlike build.sh which requires bash).
+ *
+ * Usage:
+ *   bun run scripts/build.ts
+ */
+
+import { join, dirname } from "path";
+import { mkdirSync, cpSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, "..");
+const DIST = join(ROOT, "dist");
+const TARBALLS = join(DIST, "tarballs");
+const SRC = join(ROOT, "src", "index.ts");
+
+const PKG_DIRS = {
+  "pull-pal-darwin-arm64": join(ROOT, "npm-packages", "darwin-arm64"),
+  "pull-pal-darwin-x64":   join(ROOT, "npm-packages", "darwin-x64"),
+  "pull-pal-linux-x64":    join(ROOT, "npm-packages", "linux-x64"),
+  "pull-pal-windows-x64.exe": join(ROOT, "npm-packages", "win32-x64"),
+};
+
+// Binary name inside each platform package (without the platform suffix)
+const PKG_BIN_NAMES: Record<string, string> = {
+  "pull-pal-darwin-arm64":    "pull-pal",
+  "pull-pal-darwin-x64":      "pull-pal",
+  "pull-pal-linux-x64":       "pull-pal",
+  "pull-pal-windows-x64.exe": "pull-pal.exe",
+};
+
+for (const dir of [DIST, TARBALLS, ...Object.values(PKG_DIRS)]) {
+  mkdirSync(dir, { recursive: true });
+}
+
+const targets = [
+  { target: "bun-darwin-arm64", out: "pull-pal-darwin-arm64" },
+  { target: "bun-darwin-x64",   out: "pull-pal-darwin-x64" },
+  { target: "bun-linux-x64",    out: "pull-pal-linux-x64" },
+  { target: "bun-windows-x64",  out: "pull-pal-windows-x64.exe" },
+] as const;
+
+console.log("Building pull-pal binaries with Bun...\n");
+
+for (const { target, out } of targets) {
+  process.stdout.write(`  Building ${target} ... `);
+
+  const result = Bun.spawnSync(
+    ["bun", "build", "--compile", `--target=${target}`, SRC, "--outfile", join(DIST, out)],
+    { cwd: ROOT, stdout: "inherit", stderr: "inherit" }
+  );
+
+  if (result.exitCode !== 0) {
+    console.error(`\nFailed to build ${target} (exit ${result.exitCode})`);
+    process.exit(result.exitCode ?? 1);
+  }
+  console.log("done");
+}
+
+console.log("\nCopying binaries to npm-packages/ ...");
+for (const { out } of targets) {
+  const src = join(DIST, out);
+  if (existsSync(src)) {
+    const destDir = PKG_DIRS[out];
+    const destName = PKG_BIN_NAMES[out];
+    cpSync(src, join(destDir, destName));
+    console.log(`  ${out} → npm-packages/${out.replace("pull-pal-", "").replace(".exe", "").replace("windows", "win32")}/`);
+  }
+}
+console.log("  Done");
+
+// Create macOS tarballs using Bun's shell API (cross-platform tar)
+console.log("\nCreating macOS tarballs for Homebrew ...");
+const macTargets = ["pull-pal-darwin-arm64", "pull-pal-darwin-x64"] as const;
+for (const name of macTargets) {
+  const tarball = join(TARBALLS, `${name}.tar.gz`);
+  const result = Bun.spawnSync(
+    ["tar", "-czf", tarball, "-C", DIST, name],
+    { cwd: ROOT, stdout: "inherit", stderr: "pipe" }
+  );
+  if (result.exitCode !== 0) {
+    const err = new TextDecoder().decode(result.stderr);
+    console.warn(`  Warning: could not create tarball for ${name}: ${err.trim()}`);
+    console.warn("  (tar may not be available on this platform — create tarballs on macOS/Linux)");
+  } else {
+    console.log(`  Created ${name}.tar.gz`);
+  }
+}
+
+// Print SHA256 hashes for Homebrew formula
+console.log("\nSHA256 hashes (paste into Formula/pull-pal.rb):");
+for (const name of macTargets) {
+  const tarball = join(TARBALLS, `${name}.tar.gz`);
+  if (existsSync(tarball)) {
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(await Bun.file(tarball).bytes());
+    console.log(`  ${hasher.digest("hex")}  ${name}.tar.gz`);
+  }
+}
+
+console.log(`
+All done! Artifacts:
+  Binaries        → ${DIST}
+  Platform pkgs   → ${ROOT}/npm-packages/
+  Tarballs        → ${TARBALLS}
+`);

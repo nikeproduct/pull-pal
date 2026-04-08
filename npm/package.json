@@ -1,0 +1,39 @@
+{
+  "name": "pull-pal",
+  "version": "0.1.0",
+  "description": "Git push wrapper that auto-fetches, rebases against the default branch, and runs tests before pushing",
+  "bin": {
+    "pull-pal": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "run.js",
+    "install.js"
+  ],
+  "optionalDependencies": {
+    "@judecodes/pull-pal-darwin-arm64": "0.1.0",
+    "@judecodes/pull-pal-darwin-x64": "0.1.0",
+    "@judecodes/pull-pal-linux-x64": "0.1.0",
+    "@judecodes/pull-pal-win32-x64": "0.1.0"
+  },
+  "keywords": [
+    "git",
+    "push",
+    "rebase",
+    "test",
+    "cli",
+    "pull-pal"
+  ],
+  "author": "judecodes",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/judecodes/pull-pal.git"
+  },
+  "homepage": "https://github.com/judecodes/pull-pal#readme",
+  "engines": {
+    "node": ">=16"
+  }
+}
