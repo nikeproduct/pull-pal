@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Publishes all npm packages in the correct order:
- *   1. Four platform-specific packages (@judecodes/pull-pal-*)
+ *   1. Four platform-specific packages (@nikeproduct/pull-pal-*)
  *   2. Main pull-pal package (depends on the above via optionalDependencies)
  *
  * Usage:
@@ -26,7 +26,7 @@ for (const pkgDir of packages) {
   const pkgJson = await Bun.file(join(pkgDir, "package.json")).json();
   process.stdout.write(`Publishing ${pkgJson.name}@${pkgJson.version} ... `);
 
-  const result = Bun.spawnSync(["npm", "publish"], {
+  const result = Bun.spawnSync(["npm", "publish", "--access", "public"], {
     cwd: pkgDir,
     stdout: "pipe",
     stderr: "pipe",

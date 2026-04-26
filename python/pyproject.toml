@@ -20,8 +20,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/judecodes/pull-pal"
-Repository = "https://github.com/judecodes/pull-pal"
+Homepage = "https://github.com/nikeproduct/pull-pal"
+Repository = "https://github.com/nikeproduct/pull-pal"
 
 [project.scripts]
 pull-pal = "pull_pal.cli:main"

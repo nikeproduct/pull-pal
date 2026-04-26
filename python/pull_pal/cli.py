@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 VERSION = "0.1.0"
-GITHUB_REPO = "judecodes/pull-pal"
+GITHUB_REPO = "nikeproduct/pull-pal"
 RELEASE_BASE = (
     f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}"
 )
@@ -41,7 +41,7 @@ def _get_binary_name() -> str:
 
     raise RuntimeError(
         f"pull-pal: unsupported platform {system}/{machine}\n"
-        "Please open an issue at https://github.com/judecodes/pull-pal"
+        "Please open an issue at https://github.com/nikeproduct/pull-pal"
     )
 
 

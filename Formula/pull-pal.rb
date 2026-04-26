@@ -1,6 +1,6 @@
 class PullPal < Formula
   desc "Git push wrapper: auto-fetches, rebases against default branch, runs tests before pushing"
-  homepage "https://github.com/judecodes/pull-pal"
+  homepage "https://github.com/nikeproduct/pull-pal"
   version "0.1.0"
   license "MIT"
 
@@ -9,10 +9,10 @@ class PullPal < Formula
   #   shasum -a 256 dist/tarballs/pull-pal-darwin-*.tar.gz
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/judecodes/pull-pal/releases/download/v#{version}/pull-pal-darwin-arm64.tar.gz"
+      url "https://github.com/nikeproduct/pull-pal/releases/download/v#{version}/pull-pal-darwin-arm64.tar.gz"
       sha256 "PLACEHOLDER_ARM64_SHA256"
     else
-      url "https://github.com/judecodes/pull-pal/releases/download/v#{version}/pull-pal-darwin-x64.tar.gz"
+      url "https://github.com/nikeproduct/pull-pal/releases/download/v#{version}/pull-pal-darwin-x64.tar.gz"
       sha256 "PLACEHOLDER_X64_SHA256"
     end
   end

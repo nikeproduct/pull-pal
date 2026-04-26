@@ -9,10 +9,10 @@ const platform = os.platform();
 const arch = os.arch();
 
 const PLATFORM_PACKAGES = {
-  "darwin-arm64": "@judecodes/pull-pal-darwin-arm64",
-  "darwin-x64":   "@judecodes/pull-pal-darwin-x64",
-  "linux-x64":    "@judecodes/pull-pal-linux-x64",
-  "win32-x64":    "@judecodes/pull-pal-win32-x64",
+  "darwin-arm64": "@nikeproduct/pull-pal-darwin-arm64",
+  "darwin-x64":   "@nikeproduct/pull-pal-darwin-x64",
+  "linux-x64":    "@nikeproduct/pull-pal-linux-x64",
+  "win32-x64":    "@nikeproduct/pull-pal-win32-x64",
 };
 
 try {

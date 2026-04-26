@@ -1,14 +1,14 @@
 {
-  "name": "@judecodes/pull-pal-linux-x64",
+  "name": "@nikeproduct/pull-pal-linux-x64",
   "version": "0.1.0",
   "description": "pull-pal Linux x64 binary",
   "os": ["linux"],
   "cpu": ["x64"],
-  "author": "judecodes",
+  "author": "nikeproduct",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/judecodes/pull-pal.git"
+    "url": "git+https://github.com/nikeproduct/pull-pal.git"
   },
   "files": [
     "pull-pal"

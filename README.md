@@ -31,7 +31,7 @@ The first run downloads the correct binary for your platform and caches it in `~
 ### Homebrew (macOS)
 
 ```sh
-brew tap judecodes/pull-pal
+brew tap nikeproduct/pull-pal
 brew install pull-pal
 ```
 
@@ -137,7 +137,7 @@ If no runner is detected, a warning is shown and the push proceeds.
 Requires [Bun](https://bun.sh) and Linux/macOS (or WSL on Windows).
 
 ```sh
-git clone https://github.com/judecodes/pull-pal.git
+git clone https://github.com/nikeproduct/pull-pal.git
 cd pull-pal
 bash scripts/build.sh
 ```

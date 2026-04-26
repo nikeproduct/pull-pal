@@ -1,6 +1,6 @@
 {
   "name": "pull-pal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Git push wrapper that auto-fetches, rebases against the default branch, and runs tests before pushing",
   "bin": {
     "pull-pal": "run.js"
@@ -13,10 +13,10 @@
     "install.js"
   ],
   "optionalDependencies": {
-    "@judecodes/pull-pal-darwin-arm64": "0.1.0",
-    "@judecodes/pull-pal-darwin-x64": "0.1.0",
-    "@judecodes/pull-pal-linux-x64": "0.1.0",
-    "@judecodes/pull-pal-win32-x64": "0.1.0"
+    "@nikeproduct/pull-pal-darwin-arm64": "0.1.0",
+    "@nikeproduct/pull-pal-darwin-x64": "0.1.0",
+    "@nikeproduct/pull-pal-linux-x64": "0.1.0",
+    "@nikeproduct/pull-pal-win32-x64": "0.1.0"
   },
   "keywords": [
     "git",
@@ -26,13 +26,13 @@
     "cli",
     "pull-pal"
   ],
-  "author": "judecodes",
+  "author": "nikeproduct",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/judecodes/pull-pal.git"
+    "url": "git+https://github.com/nikeproduct/pull-pal.git"
   },
-  "homepage": "https://github.com/judecodes/pull-pal#readme",
+  "homepage": "https://github.com/nikeproduct/pull-pal#readme",
   "engines": {
     "node": ">=16"
   }
