@@ -59,6 +59,7 @@ if (platform !== "win32") {
 const result = spawnSync(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   shell: false,
+  env: { ...process.env, PULLPAL_INSTALL_SOURCE: "npm" },
 });
 
 process.exit(result.status ?? 1);

@@ -16,7 +16,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.3"
 GITHUB_REPO = "nikeproduct/pull-pal"
 RELEASE_BASE = (
     f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}"
@@ -89,7 +89,8 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    result = subprocess.run([str(binary)] + sys.argv[1:])
+    env = {**os.environ, "PULLPAL_INSTALL_SOURCE": "pip"}
+    result = subprocess.run([str(binary)] + sys.argv[1:], env=env)
     sys.exit(result.returncode)
 
 

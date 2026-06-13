@@ -1,6 +1,6 @@
 {
   "name": "pull-pal",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Git push wrapper that auto-fetches, rebases against the default branch, and runs tests before pushing",
   "bin": {
     "pull-pal": "run.js"
@@ -10,13 +10,14 @@
   },
   "files": [
     "run.js",
-    "install.js"
+    "install.js",
+    "README.md"
   ],
   "optionalDependencies": {
-    "@nikeproduct/pull-pal-darwin-arm64": "0.1.0",
-    "@nikeproduct/pull-pal-darwin-x64": "0.1.0",
-    "@nikeproduct/pull-pal-linux-x64": "0.1.0",
-    "@nikeproduct/pull-pal-win32-x64": "0.1.0"
+    "@nikeproduct/pull-pal-darwin-arm64": "0.1.3",
+    "@nikeproduct/pull-pal-darwin-x64": "0.1.3",
+    "@nikeproduct/pull-pal-linux-x64": "0.1.3",
+    "@nikeproduct/pull-pal-win32-x64": "0.1.3"
   },
   "keywords": [
     "git",

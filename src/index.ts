@@ -12,6 +12,14 @@ import {
   chmodSync,
 } from "fs";
 import { join, resolve } from "path";
+import { VERSION } from "./version";
+import {
+  initAnalytics,
+  maybePrintFirstRunNotice,
+  flushAndExit,
+  type CommandProps,
+} from "./analytics";
+import { setOptOut, loadOrInitConfig, analyticsEnabled } from "./config";
 
 const RESET  = "\x1b[0m";
 const BOLD   = "\x1b[1m";
@@ -44,11 +52,17 @@ Usage:
   pull-pal [options] [git push args...]
   pull-pal setup          Install a pre-push git hook in this repo
   pull-pal remove-hook    Uninstall the pre-push git hook
+  pull-pal analytics <on|off|status>
+                          Manage anonymous usage analytics
 
 Options:
   --no-rebase   Skip the rebase-against-default-branch step
   --no-tests    Skip the test runner step
   --help        Show this help message
+  --version     Print the pull-pal version
+
+Anonymous, non-identifying analytics are on by default to help improve the tool.
+Opt out with "pull-pal analytics off", or set DO_NOT_TRACK=1.
 
 Any other flags are passed directly to git push.
 When a rebase occurs, --force-with-lease is added automatically.
@@ -76,11 +90,11 @@ function findGitDir(): string | null {
   }
 }
 
-function setupHook(): void {
+function setupHook(): number {
   const gitDir = findGitDir();
   if (!gitDir) {
     fail("Not inside a git repository.");
-    process.exit(1);
+    return 1;
   }
 
   const hooksDir = join(gitDir, "hooks");
@@ -97,10 +111,10 @@ function setupHook(): void {
         `A pre-push hook already exists at ${hookPath} and was not created by pull-pal.\n` +
         `  Add the following line to it manually:\n\n    pull-pal --hook-mode "$@"\n`
       );
-      process.exit(1);
+      return 1;
     }
     warn("pre-push hook is already installed — nothing changed.");
-    process.exit(0);
+    return 0;
   }
 
   const hookContent = `#!/bin/sh\npull-pal --hook-mode "$@"\n`;
@@ -117,20 +131,21 @@ function setupHook(): void {
   console.log(`  3. Run your test suite (auto-detected)`);
   console.log(`  4. Block the push if tests fail\n`);
   console.log(`To uninstall: ${BOLD}pull-pal remove-hook${RESET}\n`);
+  return 0;
 }
 
-function removeHook(): void {
+function removeHook(): number {
   const gitDir = findGitDir();
   if (!gitDir) {
     fail("Not inside a git repository.");
-    process.exit(1);
+    return 1;
   }
 
   const hookPath = join(gitDir, "hooks", "pre-push");
 
   if (!existsSync(hookPath)) {
     warn("No pre-push hook found — nothing to remove.");
-    process.exit(0);
+    return 0;
   }
 
   const content = readFileSync(hookPath, "utf8");
@@ -139,29 +154,15 @@ function removeHook(): void {
       `The pre-push hook at ${hookPath} was not installed by pull-pal.\n` +
       `  Remove it manually if you no longer need it.`
     );
-    process.exit(1);
+    return 1;
   }
 
   unlinkSync(hookPath);
   ok("pre-push hook removed.");
+  return 0;
 }
 
 const rawArgs = process.argv.slice(2);
-
-if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
-  printHelp();
-  process.exit(0);
-}
-
-if (rawArgs[0] === "setup") {
-  setupHook();
-  process.exit(0);
-}
-
-if (rawArgs[0] === "remove-hook") {
-  removeHook();
-  process.exit(0);
-}
 
 const noRebase = rawArgs.includes("--no-rebase");
 const noTests  = rawArgs.includes("--no-tests");
@@ -172,7 +173,65 @@ const gitArgs = rawArgs.filter(
   (a) => a !== "--no-rebase" && a !== "--no-tests" && a !== "--hook-mode"
 );
 
+function printAnalyticsStatus(): void {
+  const { config } = loadOrInitConfig();
+  const enabled = analyticsEnabled(config);
+  console.log(`Analytics: ${enabled ? "enabled" : "disabled"}`);
+  if (config) {
+    console.log(`  Device ID:      ${config.anonymousId}`);
+    console.log(`  Install source: ${config.installSource}`);
+  }
+  if (config && !config.optOut && !enabled) {
+    console.log(`  (suppressed by DO_NOT_TRACK / PULLPAL_NO_ANALYTICS)`);
+  }
+}
+
+// Subcommand / flag dispatch. Runs after analytics has been initialised so the
+// terminal commands can flush their one event before exiting.
+async function dispatch(): Promise<void> {
+  if (rawArgs.includes("--version") || rawArgs.includes("-v")) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
+  if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
+    printHelp();
+    await flushAndExit(0, { command: "help" });
+  }
+
+  if (rawArgs[0] === "analytics") {
+    const mode = rawArgs[1];
+    if (mode === "off") {
+      setOptOut(true);
+      ok("Analytics disabled. No usage data will be sent.");
+    } else if (mode === "on") {
+      setOptOut(false);
+      ok("Analytics enabled. Thank you for helping improve pull-pal.");
+    } else {
+      printAnalyticsStatus();
+    }
+    process.exit(0);
+  }
+
+  if (rawArgs[0] === "setup") {
+    await flushAndExit(setupHook(), { command: "setup" });
+  }
+
+  if (rawArgs[0] === "remove-hook") {
+    await flushAndExit(removeHook(), { command: "remove-hook" });
+  }
+
+  await main();
+}
+
 async function main(): Promise<void> {
+  const props: CommandProps = {
+    command: "push",
+    hook_mode: hookMode,
+    no_rebase: noRebase,
+    no_tests: noTests,
+  };
+
   // ── Step 1: Fetch ────────────────────────────────────────────────────────
   step("Fetching remote...");
   try {
@@ -180,7 +239,7 @@ async function main(): Promise<void> {
     ok("Fetched");
   } catch (e: unknown) {
     fail((e as Error).message);
-    process.exit(1);
+    await flushAndExit(1, { ...props, exit_code: 1, push_succeeded: false });
   }
 
   // ── Step 2: Resolve default branch ───────────────────────────────────────
@@ -202,17 +261,19 @@ async function main(): Promise<void> {
       } catch (e: unknown) {
         fail((e as Error).message);
         fail("Resolve conflicts then run: git rebase --continue");
-        process.exit(1);
+        await flushAndExit(1, { ...props, rebased: false, exit_code: 1, push_succeeded: false });
       }
     } else {
       ok(`Up to date with origin/${defaultBranch}`);
     }
   }
+  props.rebased = didRebase;
 
   // ── Step 4: Detect and run tests ─────────────────────────────────────────
   if (!noTests) {
     step("Detecting test runner...");
     const runner = detectTestRunner();
+    props.test_runner = runner ? runner.label : null;
 
     if (!runner) {
       warn("No test runner detected — skipping tests.");
@@ -222,16 +283,18 @@ async function main(): Promise<void> {
       const { exitCode } = await runTests(runner.command, runner.args);
       if (exitCode !== 0) {
         fail("Tests failed — push blocked.");
-        process.exit(exitCode);
+        props.tests_passed = false;
+        await flushAndExit(exitCode, { ...props, exit_code: exitCode, push_succeeded: false });
       }
       ok("Tests passed");
+      props.tests_passed = true;
     }
   }
 
   // ── Step 5: Push ─────────────────────────────────────────────────────────
   // In hook mode without a rebase, git itself handles the push — just exit 0.
   if (hookMode && !didRebase) {
-    process.exit(0);
+    await flushAndExit(0, props);
   }
 
   // After a rebase, history has been rewritten — force-with-lease is required.
@@ -259,10 +322,18 @@ async function main(): Promise<void> {
     fail("Push failed.");
   }
 
-  process.exit(exitCode);
+  props.push_succeeded = exitCode === 0;
+  props.exit_code = exitCode;
+  await flushAndExit(exitCode, props);
 }
 
-main().catch((e: unknown) => {
+async function entry(): Promise<void> {
+  const { isFirstRun } = initAnalytics();
+  maybePrintFirstRunNotice(isFirstRun);
+  await dispatch();
+}
+
+entry().catch(async (e: unknown) => {
   fail((e as Error).message ?? String(e));
-  process.exit(1);
+  await flushAndExit(1, { command: "push", exit_code: 1, push_succeeded: false });
 });
