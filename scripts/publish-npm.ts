@@ -36,8 +36,14 @@ for (const pkgDir of packages) {
   const stderr = new TextDecoder().decode(result.stderr);
 
   if (result.exitCode !== 0) {
-    // "already exists" is fine — skip gracefully
-    if (stderr.includes("already exists") || stderr.includes("EPUBLISHCONFLICT")) {
+    // An already-published version is fine — skip gracefully. npm phrases this
+    // several ways depending on version/registry, so match all of them.
+    if (
+      stderr.includes("already exists") ||
+      stderr.includes("EPUBLISHCONFLICT") ||
+      stderr.includes("cannot publish over") ||
+      stderr.includes("previously published versions")
+    ) {
       console.log("already published, skipping.");
       continue;
     }
