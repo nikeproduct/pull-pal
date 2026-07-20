@@ -67,6 +67,21 @@ export interface PushPlan {
 
 export type SyncPolicy = "default" | "upstream" | "off";
 
+/** A resolved test command, produced by the detection engine. */
+export interface TestPlan {
+  command: string;
+  args: string[];
+  /** What we show the user, e.g. "bun run test". */
+  label: string;
+  /** Which detector produced this — surfaced by --dry-run and doctor. */
+  source: string;
+  /**
+   * Run through the platform shell. Only set for user-configured commands, which
+   * are free-form strings ("make check && ./verify.sh") rather than argv.
+   */
+  shell?: boolean;
+}
+
 /** Resolved run options — flags merged over config merged over defaults. */
 export interface RunOptions {
   /** false = --no-sync: skip fetch AND rebase (v0.1 skipped only the rebase). */

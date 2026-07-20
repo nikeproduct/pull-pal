@@ -11,7 +11,7 @@ import type { GitRunner } from "../git/exec";
 import * as queries from "../git/queries";
 import { EXIT, UserFacingError } from "./errors";
 import { decideSync, planPush, preflight, resolveRemote, userPassedForce } from "./plan";
-import type { RunOptions, SyncDecision } from "./types";
+import type { RunOptions, SyncDecision, TestPlan } from "./types";
 
 /** Output port — the terminal implementation lives in cli/ui.ts. */
 export interface Reporter {
@@ -24,13 +24,7 @@ export interface Reporter {
   detail(msg: string): void;
 }
 
-export interface TestPlan {
-  command: string;
-  args: string[];
-  label: string;
-  /** Which detector produced this, for --dry-run and doctor. */
-  source: string;
-}
+export type { TestPlan } from "./types";
 
 export interface WorkflowDeps {
   git: GitRunner;
@@ -160,7 +154,7 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     if (!plan) {
       ui.warn("No test runner detected — skipping tests.");
       ui.detail('Set one explicitly: git config pullpal.testCommand "<command>"');
-    } else if (!deps.isRunnable(plan.command)) {
+    } else if (!plan.shell && !deps.isRunnable(plan.command)) {
       // A missing tool is an environment gap, not a test failure (defect: v0.1
       // crashed with ENOENT and blocked the push).
       ui.warn(`Detected ${plan.label}, but "${plan.command}" is not on PATH — skipping tests.`);
