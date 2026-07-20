@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 npm/bin/
 npm-packages/darwin-arm64/pull-pal
 npm-packages/darwin-x64/pull-pal

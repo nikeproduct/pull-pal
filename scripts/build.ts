@@ -77,6 +77,7 @@ for (const { out } of targets) {
   if (existsSync(src)) {
     const destDir = PKG_DIRS[out];
     const destName = PKG_BIN_NAMES[out];
+    if (!destDir || !destName) continue;
     cpSync(src, join(destDir, destName));
     console.log(`  ${out} → npm-packages/${out.replace("pull-pal-", "").replace(".exe", "").replace("windows", "win32")}/`);
   }

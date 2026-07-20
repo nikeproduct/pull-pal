@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+    branches: [main, v2]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Version consistency
+        run: bun run check-version
+
+      - name: Unit tests
+        run: bun run test:unit
+
+      - name: Integration tests
+        run: bun run test:integration
+
+  build:
+    name: build + smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build binaries
+        run: bun run build
+
+      - name: Smoke test (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          ./dist/pull-pal-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-x64 --version
+          ./dist/pull-pal-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-x64 --help
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ./dist/pull-pal-windows-x64.exe --version
+          ./dist/pull-pal-windows-x64.exe --help

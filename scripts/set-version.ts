@@ -61,7 +61,7 @@ function collectVersions(text: string, pattern: RegExp): string[] {
   const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    found.push(m[1]);
+    if (m[1] !== undefined) found.push(m[1]);
     if (m.index === re.lastIndex) re.lastIndex++; // avoid zero-width loops
   }
   return found;
