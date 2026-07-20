@@ -1,0 +1,230 @@
+name: Release
+
+# Manual releasing is what produced v0.1's worst distribution defects: a
+# Homebrew tap that was never created, a PyPI package that was never published,
+# and a build path that could ship a binary reporting the wrong version. Every
+# one of those steps is automated and verified here.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build release artifacts
+    needs: verify
+    # Built on macOS so the Homebrew tarballs are produced by the same job that
+    # publishes them, and `tar` is guaranteed present.
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha_arm64: ${{ steps.hashes.outputs.arm64 }}
+      sha_x64: ${{ steps.hashes.outputs.x64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Confirm the tag matches the manifests
+        id: version
+        run: |
+          set -euo pipefail
+          bun run check-version
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "Tag v$TAG does not match package.json version $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: bun run build
+
+      - name: Assert the tarballs are Homebrew-installable
+        run: |
+          set -euo pipefail
+          for arch in darwin-arm64 darwin-x64; do
+            members=$(tar -tzf "dist/tarballs/pull-pal-$arch.tar.gz")
+            if [ "$members" != "pull-pal" ]; then
+              echo "pull-pal-$arch.tar.gz must contain exactly 'pull-pal', got: $members" >&2
+              exit 1
+            fi
+          done
+
+      - name: Collect tarball hashes for the formula
+        id: hashes
+        run: |
+          set -euo pipefail
+          cd dist/tarballs
+          echo "arm64=$(shasum -a 256 pull-pal-darwin-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "x64=$(shasum -a 256 pull-pal-darwin-x64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            dist/pull-pal-*
+            dist/tarballs/*.tar.gz
+            dist/SHA256SUMS
+            npm-packages/
+            python/pull_pal/SHA256SUMS
+
+  github-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/pull-pal-* dist/tarballs/*.tar.gz dist/SHA256SUMS
+
+  npm:
+    name: Publish to npm
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+      - run: bun install --frozen-lockfile
+      - name: Publish platform packages, then the shim
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun run scripts/publish-npm.ts
+
+  pypi:
+    name: Publish to PyPI
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+
+      # Without this the wheel ships no checksums and the launcher cannot verify
+      # what it downloads.
+      - name: Confirm the checksum manifest is present
+        run: test -s python/pull_pal/SHA256SUMS
+
+      - name: Build and publish
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build python/
+          python -m twine upload python/dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  homebrew:
+    name: Update the Homebrew tap
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the formula for this release
+        run: |
+          set -euo pipefail
+          sed -e "s/^  version \".*\"/  version \"${{ needs.build.outputs.version }}\"/" \
+              -e "s/REPLACED_ON_RELEASE_DARWIN_ARM64/${{ needs.build.outputs.sha_arm64 }}/" \
+              -e "s/REPLACED_ON_RELEASE_DARWIN_X64/${{ needs.build.outputs.sha_x64 }}/" \
+              Formula/pull-pal.rb > /tmp/pull-pal.rb
+          grep -q REPLACED_ON_RELEASE /tmp/pull-pal.rb && exit 1 || true
+
+      - name: Open a PR against the tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/nikeproduct/homebrew-pull-pal.git" tap
+          cd tap
+          mkdir -p Formula
+          cp /tmp/pull-pal.rb Formula/pull-pal.rb
+          git config user.name "pull-pal release bot"
+          git config user.email "noreply@github.com"
+          git checkout -b "release-${{ needs.build.outputs.version }}"
+          git add Formula/pull-pal.rb
+          git commit -m "pull-pal ${{ needs.build.outputs.version }}"
+          git push -u origin "release-${{ needs.build.outputs.version }}"
+          gh pr create --fill --base main
+
+  smoke:
+    name: Install from ${{ matrix.channel }}
+    needs: [npm, pypi]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: npm
+            os: ubuntu-latest
+          - channel: pip
+            os: ubuntu-latest
+          - channel: npm
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Installing from the real registries is the only check that proves a
+      # release is actually usable, rather than merely uploaded.
+      - name: Wait for registry propagation
+        run: sleep 60
+
+      - uses: actions/setup-node@v4
+        if: matrix.channel == 'npm'
+        with:
+          node-version: "20"
+      - name: npm install and run
+        if: matrix.channel == 'npm'
+        run: |
+          npm install -g pull-pal@${{ needs.build.outputs.version }}
+          pull-pal --version
+          pull-pal --help
+
+      - uses: actions/setup-python@v5
+        if: matrix.channel == 'pip'
+        with:
+          python-version: "3.11"
+      - name: pip install and run
+        if: matrix.channel == 'pip'
+        run: |
+          pip install "pull-pal==${{ needs.build.outputs.version }}"
+          pull-pal --version

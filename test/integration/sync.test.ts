@@ -306,4 +306,18 @@ describe("dry run", () => {
       expect(out).toContain("stub-runner test");
     });
   });
+
+  // The plan is only useful if it is the plan: a first push publishes the
+  // branch, so --dry-run has to say so rather than printing a bare `git push`.
+  test("reports --set-upstream for a branch that has never been pushed", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["checkout", "-q", "-b", "brand-new"]);
+      repo.commit("work", { "n.txt": "n" });
+
+      const h = makeDeps(repo.dir);
+      await runPush(h.deps, options({ dryRun: true }));
+
+      expect(h.ui.text()).toContain("git push --set-upstream origin brand-new");
+    });
+  });
 });

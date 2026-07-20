@@ -116,9 +116,12 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     return outcome({ exitCode: EXIT.blocked, blocked: "diverged-upstream" });
   }
 
+  // The branch is published on its first push, so the plan must say so.
+  const setUpstream = !syncState.upstream && base.branch ? { remote, branch: base.branch } : null;
+
   // ── Dry run stops here, after everything has been decided ────────────────
   if (opts.dryRun) {
-    printDryRun(deps, opts, decision, remote);
+    printDryRun(deps, opts, decision, remote, setUpstream);
     return outcome({ exitCode: EXIT.ok });
   }
 
@@ -180,7 +183,7 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   const pushPlan = planPush({
     gitArgs: opts.gitArgs,
     didRebase: rebased,
-    setUpstream: !syncState.upstream && base.branch ? { remote, branch: base.branch } : null,
+    setUpstream,
   });
 
   if (pushPlan.forceLeaseAdded) {
@@ -209,6 +212,7 @@ function printDryRun(
   opts: RunOptions,
   decision: SyncDecision,
   remote: string,
+  setUpstream: { remote: string; branch: string } | null,
 ): void {
   const { ui } = deps;
   ui.info("Dry run — nothing will be changed.");
@@ -233,7 +237,7 @@ function printDryRun(
   const pushPlan = planPush({
     gitArgs: opts.gitArgs,
     didRebase: decision.action === "rebase",
-    setUpstream: null,
+    setUpstream,
   });
   ui.info(`  push:    git push ${pushPlan.args.join(" ")}`.trimEnd());
 }

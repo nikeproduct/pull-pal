@@ -1,7 +1,27 @@
 # pull-pal v0.2 — Ground-Up Rebuild Plan
 
-**Status:** proposed · **Owner:** Jude · **Created:** 2026-07-20
+**Status:** implemented on `v2` — M0–M7 landed, all 24 ledger rows closed
+**Owner:** Jude · **Created:** 2026-07-20
 **Supersedes:** v0.1.x implementation (kept on `main` until v0.2 ships from the `v2` branch)
+
+> **Implementation notes.** Two design decisions in §5 changed once the tests
+> could speak:
+>
+> 1. **The lease is bare, not pinned.** §5.2 proposed pinning
+>    `--force-with-lease` to the pre-fetch sha. In the ordinary "behind → rebase"
+>    case those fetched commits *are* incorporated by the rebase, so the pin is
+>    stale and rejects every legitimate push. The semantic risk is instead
+>    covered by the divergence guard (which blocks force-pushing over
+>    unincorporated commits), leaving the bare lease to do what it is actually
+>    good at: catching a race between our fetch and our push.
+> 2. **The divergence guard is scoped to force-pushes.** Blocking every
+>    merely-behind push duplicated git's own non-fast-forward rejection and made
+>    pull-pal obstructive where plain git is already correct.
+>
+> Before shipping, the release still needs three things only a human can do:
+> create the `nikeproduct/homebrew-pull-pal` tap repository, add the
+> `NPM_TOKEN` / `PYPI_TOKEN` / `TAP_TOKEN` secrets, and bump the version with
+> `bun run set-version 0.2.0`.
 
 ---
 
