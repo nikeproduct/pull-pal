@@ -14,9 +14,12 @@ import { renderHelp } from "./cli/help";
 import { createUi } from "./cli/ui";
 import { loadConfig } from "./config";
 import { EXIT, isUserFacing } from "./core/errors";
-import { runPush } from "./core/workflow";
+import { type PushRef, parsePushRefs, runGate } from "./core/gate";
+import { type WorkflowDeps, runPush } from "./core/workflow";
 import { createFsView, detectTestRunner } from "./detect/index";
+import { isInternalInvocation } from "./git/actions";
 import { createGitRunner } from "./git/exec";
+import { describeHookState, installHook, readHookState, removeHook } from "./hooks/install";
 import { isRunnable, runTests } from "./testing";
 import { VERSION } from "./version";
 
@@ -27,6 +30,24 @@ import { VERSION } from "./version";
 function repoRoot(cwd: string): string {
   const r = createGitRunner(cwd).capture(["rev-parse", "--show-toplevel"]);
   return r.exitCode === 0 && r.stdout ? r.stdout : cwd;
+}
+
+/**
+ * Git feeds the pre-push hook its ref list on stdin. We must consume it — both
+ * to know whether this push is only deleting branches, and so that a test runner
+ * later in the pipeline cannot swallow the protocol (it is given no stdin at all
+ * in hook mode, but draining first is what makes that safe).
+ *
+ * Guarded on isTTY so that running `pull-pal --hook-mode` by hand never hangs
+ * waiting for input that will not come.
+ */
+async function readPushRefs(): Promise<PushRef[]> {
+  if (process.stdin.isTTY) return [];
+  try {
+    return parsePushRefs(await Bun.stdin.text());
+  } catch {
+    return [];
+  }
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -56,16 +77,45 @@ async function main(argv: string[]): Promise<number> {
   switch (command.kind) {
     case "doctor": {
       process.stdout.write(
-        `${renderDoctor({ version: VERSION, git, config, detect, isRunnable })}\n`,
+        `${renderDoctor({
+          version: VERSION,
+          git,
+          config,
+          detect,
+          isRunnable,
+          hookStatus: describeHookState(readHookState(git)),
+        })}\n`,
       );
       return EXIT.ok;
     }
 
-    case "setup":
-    case "remove-hook":
+    case "setup": {
+      const result = installHook(git);
+      if (!result.ok) {
+        ui.fail(result.message);
+        if (result.hint) for (const l of result.hint.split("\n")) ui.detail(l);
+        return EXIT.preflight;
+      }
+      ui.ok(result.message);
+      ui.detail("Every git push in this repo will now be checked before it leaves.");
+      ui.detail("When a rebase is needed the push is blocked — run pull-pal to do it.");
+      return EXIT.ok;
+    }
+
+    case "remove-hook": {
+      const result = removeHook(git);
+      if (!result.ok) {
+        ui.fail(result.message);
+        if (result.hint) for (const l of result.hint.split("\n")) ui.detail(l);
+        return EXIT.preflight;
+      }
+      ui.ok(result.message);
+      return EXIT.ok;
+    }
+
     case "analytics": {
-      // Landing in M4 (hooks) and M5 (analytics).
-      ui.fail(`"${command.kind}" is not available in this build yet.`);
+      // Landing in M5.
+      ui.fail('"analytics" is not available in this build yet.');
       return EXIT.preflight;
     }
 
@@ -74,16 +124,25 @@ async function main(argv: string[]): Promise<number> {
         syncPolicy: config.syncPolicy,
         testsEnabled: config.testsEnabled,
       });
-      const outcome = await runPush(
-        {
-          git,
-          ui,
-          detectTests: detect,
-          isRunnable,
-          runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
-        },
-        opts,
-      );
+
+      const deps: WorkflowDeps = {
+        git,
+        ui,
+        detectTests: detect,
+        isRunnable,
+        // Hook mode must never inherit stdin: that is where git's ref list lives.
+        runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
+      };
+
+      if (opts.hookMode) {
+        // pull-pal's own push already ran every one of these checks.
+        if (isInternalInvocation()) return EXIT.ok;
+        const refs = await readPushRefs();
+        const outcome = await runGate(deps, { ...opts, gateMode: config.hookGate, refs });
+        return outcome.exitCode;
+      }
+
+      const outcome = await runPush(deps, opts);
       return outcome.exitCode;
     }
   }

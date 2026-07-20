@@ -9,6 +9,7 @@
  * default rather than failing a push.
  */
 
+import type { GateMode } from "./core/gate";
 import type { SyncPolicy } from "./core/types";
 import type { GitRunner } from "./git/exec";
 
@@ -16,19 +17,27 @@ export interface PullPalConfig {
   syncPolicy: SyncPolicy;
   testsEnabled: boolean;
   testCommand: string | null;
+  /** Whether the pre-push hook blocks or merely warns when out of sync. */
+  hookGate: GateMode;
 }
 
 export const DEFAULT_CONFIG: PullPalConfig = {
   syncPolicy: "default",
   testsEnabled: true,
   testCommand: null,
+  hookGate: "block",
 };
 
 export const CONFIG_KEYS = {
   sync: "pullpal.sync",
   tests: "pullpal.tests",
   testCommand: "pullpal.testCommand",
+  hookGate: "pullpal.hookGate",
 } as const;
+
+export function parseGateMode(value: string | null): GateMode {
+  return value?.toLowerCase() === "warn" ? "warn" : DEFAULT_CONFIG.hookGate;
+}
 
 function readKey(git: GitRunner, key: string): string | null {
   const r = git.capture(["config", "--get", key]);
@@ -73,6 +82,7 @@ export function loadConfig(git: GitRunner): PullPalConfig {
     syncPolicy: parseSyncPolicy(readKey(git, CONFIG_KEYS.sync)),
     testsEnabled: parseBool(readKey(git, CONFIG_KEYS.tests), DEFAULT_CONFIG.testsEnabled),
     testCommand: readKey(git, CONFIG_KEYS.testCommand),
+    hookGate: parseGateMode(readKey(git, CONFIG_KEYS.hookGate)),
   };
 }
 
