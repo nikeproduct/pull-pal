@@ -47,8 +47,11 @@ export interface Fixture {
   sha(ref?: string): string;
   /** Current checked-out branch name. */
   currentBranch(): string;
-  /** Advance a branch on the *remote* by one commit, as if a teammate pushed. */
-  advanceRemote(branch?: string, message?: string): string;
+  /**
+   * Advance a branch on the *remote* by one commit, as if a teammate pushed.
+   * Pass `files` to control the content (used to manufacture rebase conflicts).
+   */
+  advanceRemote(branch?: string, message?: string, files?: Record<string, string>): string;
   /** Run the compiled-from-source pull-pal against this clone. */
   runPullPal(args: string[], opts?: RunOptions): Promise<ExecResult>;
   /** Remove all temp dirs. Safe to call twice. */
@@ -121,6 +124,9 @@ export function makeRepo(opts: MakeRepoOptions = {}): Fixture {
   // Record origin/HEAD locally the way a normal clone would.
   git(dir, ["remote", "set-head", "origin", defaultBranch]);
 
+  // Keeps generated remote-side filenames unique without depending on the clock.
+  let advanceCounter = 0;
+
   const fixture: Fixture = {
     dir,
     remoteDir,
@@ -140,11 +146,21 @@ export function makeRepo(opts: MakeRepoOptions = {}): Fixture {
     },
     sha: (ref = "HEAD") => git(dir, ["rev-parse", ref]).stdout,
     currentBranch: () => git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
-    advanceRemote(branch = defaultBranch, message = "remote advance") {
+    advanceRemote(
+      branch = defaultBranch,
+      message = "remote advance",
+      files?: Record<string, string>,
+    ) {
       const scratch = mkdtempSync(join(root, "advance-"));
       gitOrThrow(root, ["clone", "--quiet", "--branch", branch, remoteDir, scratch]);
       configureIdentity(scratch);
-      writeFileSync(join(scratch, `remote-${Date.now()}.txt`), message, "utf8");
+      advanceCounter += 1;
+      const payload = files ?? { [`remote-${advanceCounter}.txt`]: message };
+      for (const [rel, content] of Object.entries(payload)) {
+        const abs = join(scratch, rel);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, content, "utf8");
+      }
       gitOrThrow(scratch, ["add", "-A"]);
       gitOrThrow(scratch, ["commit", "-m", message]);
       const sha = git(scratch, ["rev-parse", "HEAD"]).stdout;
