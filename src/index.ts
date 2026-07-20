@@ -20,6 +20,8 @@ import { createFsView, detectTestRunner } from "./detect/index";
 import { isInternalInvocation } from "./git/actions";
 import { createGitRunner } from "./git/exec";
 import { describeHookState, installHook, readHookState, removeHook } from "./hooks/install";
+import { FIRST_RUN_NOTICE, createTelemetry } from "./telemetry/index";
+import { defaultConfigDir, setOptOut } from "./telemetry/state";
 import { isRunnable, runTests } from "./testing";
 import { VERSION } from "./version";
 
@@ -55,12 +57,49 @@ async function main(argv: string[]): Promise<number> {
   const ui = createUi();
   for (const warning of warnings) ui.warn(warning);
 
-  if (command.kind === "help") {
-    process.stdout.write(renderHelp(VERSION));
-    return EXIT.ok;
-  }
+  // --version must stay instant and silent: it is what scripts and installers
+  // call, and it should never touch disk, network, or print a notice.
   if (command.kind === "version") {
     process.stdout.write(`${VERSION}\n`);
+    return EXIT.ok;
+  }
+
+  const telemetry = createTelemetry();
+  if (telemetry.isFirstRun && telemetry.enabled) {
+    process.stderr.write(`${FIRST_RUN_NOTICE}\n`);
+  }
+
+  if (command.kind === "help") {
+    process.stdout.write(renderHelp(VERSION));
+    await telemetry.flush({ command: "help" });
+    return EXIT.ok;
+  }
+
+  if (command.kind === "analytics") {
+    const dir = defaultConfigDir();
+    if (command.mode === "on" || command.mode === "off") {
+      const updated = setOptOut(dir, command.mode === "off");
+      if (!updated) {
+        ui.fail("Could not write the analytics preference.");
+        return EXIT.preflight;
+      }
+      ui.ok(
+        command.mode === "off"
+          ? "Analytics disabled. No usage data will be sent."
+          : "Analytics enabled. Thank you for helping improve pull-pal.",
+      );
+      return EXIT.ok;
+    }
+
+    const state = telemetry.state;
+    process.stdout.write(`Analytics: ${telemetry.enabled ? "enabled" : "disabled"}\n`);
+    if (state) {
+      process.stdout.write(`  Device ID:      ${state.anonymousId}\n`);
+      process.stdout.write(`  Install source: ${state.installSource}\n`);
+      if (!state.optOut && !telemetry.enabled) {
+        process.stdout.write("  (suppressed by DO_NOT_TRACK / PULLPAL_NO_ANALYTICS)\n");
+      }
+    }
     return EXIT.ok;
   }
 
@@ -86,6 +125,7 @@ async function main(argv: string[]): Promise<number> {
           hookStatus: describeHookState(readHookState(git)),
         })}\n`,
       );
+      await telemetry.flush({ command: "doctor" });
       return EXIT.ok;
     }
 
@@ -94,11 +134,13 @@ async function main(argv: string[]): Promise<number> {
       if (!result.ok) {
         ui.fail(result.message);
         if (result.hint) for (const l of result.hint.split("\n")) ui.detail(l);
+        await telemetry.flush({ command: "setup", exit_code: EXIT.preflight });
         return EXIT.preflight;
       }
       ui.ok(result.message);
       ui.detail("Every git push in this repo will now be checked before it leaves.");
       ui.detail("When a rebase is needed the push is blocked — run pull-pal to do it.");
+      await telemetry.flush({ command: "setup", exit_code: EXIT.ok });
       return EXIT.ok;
     }
 
@@ -110,13 +152,8 @@ async function main(argv: string[]): Promise<number> {
         return EXIT.preflight;
       }
       ui.ok(result.message);
+      await telemetry.flush({ command: "remove-hook", exit_code: EXIT.ok });
       return EXIT.ok;
-    }
-
-    case "analytics": {
-      // Landing in M5.
-      ui.fail('"analytics" is not available in this build yet.');
-      return EXIT.preflight;
     }
 
     case "push": {
@@ -134,15 +171,41 @@ async function main(argv: string[]): Promise<number> {
         runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
       };
 
+      const shared = {
+        no_sync: !opts.sync,
+        no_tests: !opts.tests,
+        dry_run: opts.dryRun,
+        sync_policy: opts.syncPolicy,
+      };
+
       if (opts.hookMode) {
         // pull-pal's own push already ran every one of these checks.
         if (isInternalInvocation()) return EXIT.ok;
         const refs = await readPushRefs();
         const outcome = await runGate(deps, { ...opts, gateMode: config.hookGate, refs });
+        await telemetry.flush({
+          ...shared,
+          command: "gate",
+          hook_mode: true,
+          hook_gate_result: outcome.blocked ?? "allowed",
+          test_runner: outcome.testRunner,
+          tests_passed: outcome.testsPassed,
+          exit_code: outcome.exitCode,
+        });
         return outcome.exitCode;
       }
 
       const outcome = await runPush(deps, opts);
+      await telemetry.flush({
+        ...shared,
+        command: "push",
+        rebased: outcome.rebased,
+        test_runner: outcome.testRunner,
+        tests_passed: outcome.testsPassed,
+        push_succeeded: outcome.pushed,
+        blocked: outcome.blocked,
+        exit_code: outcome.exitCode,
+      });
       return outcome.exitCode;
     }
   }

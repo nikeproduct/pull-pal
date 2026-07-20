@@ -19,6 +19,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 /** Absolute path to the pull-pal entry point, run via `bun`. */
 export const ENTRY = join(HERE, "..", "..", "src", "index.ts");
 
+/**
+ * Tests must never phone home or touch the developer's real ~/.pull-pal.
+ *
+ * Set on the test process itself rather than per-spawn, because pushes reach
+ * pull-pal indirectly — through git, through the pre-push hook — and every one
+ * of those children inherits this environment.
+ */
+process.env.PULLPAL_NO_ANALYTICS = "1";
+process.env.PULLPAL_CONFIG_DIR = mkdtempSync(join(tmpdir(), "pullpal-test-home-"));
+
 export interface ExecResult {
   stdout: string;
   stderr: string;
