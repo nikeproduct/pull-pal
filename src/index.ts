@@ -8,6 +8,8 @@
  * anything else is a bug in pull-pal and says so.
  */
 
+import { readFileSync } from "node:fs";
+import { isatty } from "node:tty";
 import { parseArgs, toRunOptions } from "./cli/args";
 import { renderDoctor } from "./cli/doctor";
 import { renderHelp } from "./cli/help";
@@ -40,13 +42,19 @@ function repoRoot(cwd: string): string {
  * later in the pipeline cannot swallow the protocol (it is given no stdin at all
  * in hook mode, but draining first is what makes that safe).
  *
- * Guarded on isTTY so that running `pull-pal --hook-mode` by hand never hangs
+ * The read is blocking on purpose. Awaiting `Bun.stdin.text()` here let the
+ * event loop drain on Windows before the pipe delivered anything, and Bun then
+ * exited 0 with the gate never run — a hook that silently failed open. A
+ * synchronous read has no event loop to lose, and git closes the pipe as soon
+ * as the ref list is written, so it returns promptly.
+ *
+ * Guarded on isatty so that running `pull-pal --hook-mode` by hand never hangs
  * waiting for input that will not come.
  */
-async function readPushRefs(): Promise<PushRef[]> {
-  if (process.stdin.isTTY) return [];
+function readPushRefs(): PushRef[] {
+  if (isatty(0)) return [];
   try {
-    return parsePushRefs(await Bun.stdin.text());
+    return parsePushRefs(readFileSync(0, "utf8"));
   } catch {
     return [];
   }
@@ -181,7 +189,7 @@ async function main(argv: string[]): Promise<number> {
       if (opts.hookMode) {
         // pull-pal's own push already ran every one of these checks.
         if (isInternalInvocation()) return EXIT.ok;
-        const refs = await readPushRefs();
+        const refs = readPushRefs();
         const outcome = await runGate(deps, { ...opts, gateMode: config.hookGate, refs });
         await telemetry.flush({
           ...shared,
