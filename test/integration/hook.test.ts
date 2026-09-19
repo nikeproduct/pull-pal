@@ -171,6 +171,32 @@ describe("gate behaviour under real git push", () => {
     });
   });
 
+  test("the gate checks the remote git is actually pushing to", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      repo.git(["config", "pullpal.tests", "off"]);
+
+      // A second remote whose main is ahead of ours, while origin stays current.
+      const otherDir = join(repo.dir, "..", "other.git");
+      expect(repo.git(["clone", "--quiet", "--bare", repo.remoteDir, otherDir]).exitCode).toBe(0);
+      expect(repo.git(["remote", "add", "other", otherDir]).exitCode).toBe(0);
+      const scratch = join(repo.dir, "..", "other-work");
+      expect(repo.git(["clone", "--quiet", otherDir, scratch]).exitCode).toBe(0);
+      repo.git(["-C", scratch, "config", "user.email", "test@pull-pal.dev"]);
+      repo.git(["-C", scratch, "config", "user.name", "Pull Pal Test"]);
+      repo.git(["-C", scratch, "config", "commit.gpgsign", "false"]);
+      expect(repo.git(["-C", scratch, "commit", "--allow-empty", "-m", "ahead"]).exitCode).toBe(0);
+      expect(repo.git(["-C", scratch, "push", "--quiet", "origin", "main"]).exitCode).toBe(0);
+
+      repo.commit("mine", { "mine.txt": "mine" });
+      const push = repo.git(["push", "other", "main"]);
+
+      expect(push.exitCode).not.toBe(0);
+      expect(push.stderr).toContain("Push blocked");
+      expect(push.stderr).toContain("other/main");
+    });
+  });
+
   test("pullpal.hookGate=warn lets an out-of-date push through", async () => {
     await withRepo(async (repo) => {
       await install(repo);

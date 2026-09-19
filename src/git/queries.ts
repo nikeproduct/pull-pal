@@ -168,3 +168,21 @@ export function readSyncState(git: GitRunner, remote: string): SyncState {
     behindUpstream,
   };
 }
+
+/**
+ * Sync state for --no-sync: no network, no default-branch resolution.
+ *
+ * Only the upstream is read, because it decides whether the push has to publish
+ * the branch with --set-upstream. `resolveDefaultBranch` is skipped on purpose:
+ * its `ls-remote` fallback would break the flag's promise of skipping the fetch.
+ */
+export function readOfflineSyncState(git: GitRunner, remote: string): SyncState {
+  return {
+    remote,
+    defaultBranch: null,
+    behindDefault: null,
+    upstream: readUpstream(git),
+    aheadUpstream: null,
+    behindUpstream: null,
+  };
+}

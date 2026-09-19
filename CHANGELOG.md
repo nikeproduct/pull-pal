@@ -89,6 +89,8 @@ now do.
 - The pip launcher downloaded and executed a binary with no integrity check, no
   timeout, and a cache race. It now verifies against checksums shipped in the
   wheel, downloads to a temporary file, and installs atomically.
+  The cache is versioned (`~/.pull-pal/bin/<version>/`), so upgrading the
+  package runs the binary that matches it rather than whichever was cached first.
 - `build.sh` did not regenerate the embedded version, so a release cut with it
   shipped binaries reporting the wrong version. There is now one build path, and
   `check-version` verifies the generated file.

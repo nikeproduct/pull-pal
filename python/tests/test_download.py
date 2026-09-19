@@ -166,3 +166,24 @@ def test_unsupported_platforms_fail_with_guidance(monkeypatch, system, machine):
 
 def test_version_matches_the_release_url():
     assert cli.RELEASE_BASE.endswith(f"/v{cli.VERSION}")
+
+
+def test_cache_dir_is_versioned_so_upgrades_refresh_the_binary():
+    assert cli.CACHE_DIR == cli.CACHE_ROOT / cli.VERSION
+
+
+def test_prune_removes_other_versions_and_the_old_flat_layout(tmp_path, monkeypatch):
+    root = tmp_path / "bin"
+    (root / "0.1.3").mkdir(parents=True)
+    (root / "0.1.3" / "pull-pal-linux-x64").write_bytes(b"old")
+    (root / cli.VERSION).mkdir()
+    (root / cli.VERSION / "pull-pal-linux-x64").write_bytes(b"current")
+    (root / "pull-pal-linux-x64").write_bytes(b"pre-0.2 layout")
+    (root / "unrelated.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(cli, "CACHE_ROOT", root)
+    monkeypatch.setattr(cli, "CACHE_DIR", root / cli.VERSION)
+
+    cli._prune_old_versions()
+
+    assert sorted(p.name for p in root.iterdir()) == sorted([cli.VERSION, "unrelated.txt"])
+    assert (root / cli.VERSION / "pull-pal-linux-x64").read_bytes() == b"current"

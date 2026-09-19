@@ -220,7 +220,13 @@ export function planPush(input: PushPlanInput): PushPlan {
 
   let args = gitArgs;
   if (setUpstream && !hasPositional(gitArgs)) {
-    args = [...args, "--set-upstream", setUpstream.remote, setUpstream.branch];
+    // Options must precede `--`; anything after it is a refspec to git.
+    const extra = ["--set-upstream", setUpstream.remote, setUpstream.branch];
+    const separator = args.indexOf("--");
+    args =
+      separator === -1
+        ? [...args, ...extra]
+        : [...args.slice(0, separator), ...extra, ...args.slice(separator)];
   }
 
   if (!didRebase || userPassedForce(gitArgs)) {

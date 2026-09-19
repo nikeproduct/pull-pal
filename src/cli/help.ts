@@ -38,6 +38,7 @@ Configuration (per repo, or --global):
   git config pullpal.sync default|upstream|off   Which branch to rebase onto
   git config pullpal.tests on|off                Run tests before pushing
   git config pullpal.testCommand "<command>"     Override test detection
+  git config pullpal.hookGate block|warn         Hook behaviour when out of sync
 
 After a rebase, pull-pal pushes with --force-with-lease. It refuses to do so
 when the remote branch has commits you have not incorporated.

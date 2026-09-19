@@ -101,7 +101,9 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   }
 
   // ── Sync decision ────────────────────────────────────────────────────────
-  const syncState = queries.readSyncState(git, remote);
+  const syncState = opts.sync
+    ? queries.readSyncState(git, remote)
+    : queries.readOfflineSyncState(git, remote);
   const decision = decideSync({
     base,
     sync: syncState,

@@ -25,7 +25,7 @@ brew install nikeproduct/pull-pal/pull-pal
 
 The npm package ships the binary for your platform as an optional dependency.
 The pip package downloads it on first run, verifies it against checksums shipped
-inside the package, and caches it in `~/.pull-pal/bin/`.
+inside the package, and caches it in `~/.pull-pal/bin/<version>/`.
 
 ---
 
@@ -230,7 +230,8 @@ Requires [Bun](https://bun.sh).
 
 ```sh
 bun install
-bun test          # unit + real-git integration tests
+bun run test      # unit + real-git integration tests (the script sets the timeout the
+                  # integration tests need; bare `bun test` cuts them off at 5s)
 bun run typecheck
 bun run lint
 bun run build     # binaries, tarballs, checksums, npm packages

@@ -244,6 +244,15 @@ describe("decideSync", () => {
 });
 
 describe("planPush", () => {
+  test("keeps --set-upstream ahead of a user-supplied -- separator", () => {
+    const p = planPush({
+      gitArgs: ["--"],
+      didRebase: false,
+      setUpstream: { remote: "origin", branch: "feature" },
+    });
+    expect(p.args).toEqual(["--set-upstream", "origin", "feature", "--"]);
+  });
+
   test("passes args through untouched when no rebase happened", () => {
     const p = planPush({
       gitArgs: ["origin", "feature"],

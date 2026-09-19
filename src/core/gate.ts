@@ -97,8 +97,10 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
 
   // ── Sync check ───────────────────────────────────────────────────────────
   if (opts.sync) {
+    // Git hands the hook the remote's name as its first argument, so a push to a
+    // second remote is checked against that remote, not the branch's upstream.
     const upstreamRemote = queries.readUpstreamRemote(git, base.branch);
-    const remote = resolveRemote([], base.remotes, upstreamRemote);
+    const remote = resolveRemote(opts.gitArgs, base.remotes, upstreamRemote);
 
     const fetched = actions.fetch(git, remote);
     if (!fetched.ok) {

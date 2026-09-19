@@ -10,7 +10,7 @@ pull-pal
 
 On first run this package downloads the pre-compiled pull-pal binary for your
 platform from GitHub Releases, verifies it against the checksums shipped inside
-this package, and caches it in `~/.pull-pal/bin/`. Every later run executes the
+this package, and caches it in `~/.pull-pal/bin/<version>/`. Every later run executes the
 cached binary directly with no network access.
 
 Full documentation, configuration, and the pre-push hook:

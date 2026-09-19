@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import shutil
 import stat
 import subprocess
 import sys
@@ -27,7 +28,10 @@ from pathlib import Path
 VERSION = "0.2.0"
 GITHUB_REPO = "nikeproduct/pull-pal"
 RELEASE_BASE = f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}"
-CACHE_DIR = Path.home() / ".pull-pal" / "bin"
+CACHE_ROOT = Path.home() / ".pull-pal" / "bin"
+# Versioned, so upgrading the package runs the binary that matches it rather than
+# whatever was cached first. Other versions are pruned after a fresh download.
+CACHE_DIR = CACHE_ROOT / VERSION
 DOWNLOAD_TIMEOUT_SECONDS = 60
 _CHECKSUMS_FILE = Path(__file__).with_name("SHA256SUMS")
 
@@ -134,6 +138,21 @@ def _download_verified(url: str, destination: Path, expected: str | None) -> Non
             tmp_path.unlink(missing_ok=True)
 
 
+def _prune_old_versions() -> None:
+    """Best-effort removal of binaries cached by other launcher versions."""
+    try:
+        for entry in CACHE_ROOT.iterdir():
+            if entry.name == VERSION:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            elif entry.name.startswith("pull-pal-"):
+                # The pre-0.2 layout kept binaries directly under bin/.
+                entry.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _get_or_download_binary() -> Path:
     binary_name = _binary_name()
     cached = CACHE_DIR / binary_name
@@ -153,6 +172,7 @@ def _get_or_download_binary() -> Path:
         )
 
     _download_verified(url, cached, expected)
+    _prune_old_versions()
     print("[pull-pal] Binary cached — future runs are instant.", file=sys.stderr)
     return cached
 

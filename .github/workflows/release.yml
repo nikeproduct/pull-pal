@@ -30,10 +30,14 @@ jobs:
     runs-on: macos-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
       sha_arm64: ${{ steps.hashes.outputs.arm64 }}
       sha_x64: ${{ steps.hashes.outputs.x64 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual run names an existing tag; build from it, not from the branch.
+          ref: ${{ inputs.tag || github.ref }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -46,12 +50,15 @@ jobs:
           set -euo pipefail
           bun run check-version
           VERSION=$(node -p "require('./package.json').version")
-          TAG="${GITHUB_REF_NAME#v}"
+          # On a manual run the ref is a branch, so the tag comes from the input.
+          TAG_NAME="${{ inputs.tag || github.ref_name }}"
+          TAG="${TAG_NAME#v}"
           if [ "$VERSION" != "$TAG" ]; then
-            echo "Tag v$TAG does not match package.json version $VERSION" >&2
+            echo "Tag $TAG_NAME does not match package.json version $VERSION" >&2
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: bun run build
@@ -96,10 +103,11 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "$TAG" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
+            --title "$TAG" \
             --generate-notes \
             dist/pull-pal-* dist/tarballs/*.tar.gz dist/SHA256SUMS
 
@@ -109,6 +117,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual run names an existing tag; build from it, not from the branch.
+          ref: ${{ inputs.tag || github.ref }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -130,10 +141,11 @@ jobs:
     needs: [build, github-release]
     runs-on: ubuntu-latest
     environment: pypi
-    permissions:
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual run names an existing tag; build from it, not from the branch.
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -161,6 +173,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A manual run names an existing tag; build from it, not from the branch.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Render the formula for this release
         run: |
@@ -190,7 +205,9 @@ jobs:
 
   smoke:
     name: Install from ${{ matrix.channel }}
-    needs: [npm, pypi]
+    # `build` must be a direct dependency: the needs context only exposes the
+    # outputs of jobs listed here, and this job pins installs to its version.
+    needs: [build, npm, pypi]
     strategy:
       fail-fast: false
       matrix:

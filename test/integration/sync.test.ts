@@ -321,3 +321,23 @@ describe("dry run", () => {
     });
   });
 });
+
+describe("--no-sync", () => {
+  // Resolving the default branch falls back to `ls-remote` and then caches the
+  // answer as origin/HEAD. With sync off neither may happen: the flag promises
+  // no network, so the absence of that cached ref afterwards is the proof.
+  test("never resolves the default branch over the network", async () => {
+    await withRepo(async (repo) => {
+      expect(repo.git(["remote", "set-head", "origin", "--delete"]).exitCode).toBe(0);
+      repo.commit("local work", { "a.txt": "a" });
+      const h = makeDeps(repo.dir);
+
+      const result = await runPush(h.deps, options({ sync: false }));
+
+      expect(result.exitCode).toBe(EXIT.ok);
+      expect(result.pushed).toBe(true);
+      const head = repo.git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+      expect(head.exitCode).not.toBe(0);
+    });
+  });
+});
