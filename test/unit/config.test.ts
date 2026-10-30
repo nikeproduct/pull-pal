@@ -1,9 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_CONFIG, colorEnabled, parseBool, parseSyncPolicy } from "../../src/config";
+import {
+  DEFAULT_CONFIG,
+  colorEnabled,
+  parseBool,
+  parseConflictMode,
+  parseLongLived,
+  parseSyncPolicy,
+} from "../../src/config";
 
 describe("parseSyncPolicy", () => {
   test.each([
-    ["default", "default"],
+    ["check", "check"],
+    ["rebase", "rebase"],
     ["upstream", "upstream"],
     ["off", "off"],
     ["none", "off"],
@@ -15,6 +23,38 @@ describe("parseSyncPolicy", () => {
 
   test.each([[null], ["nonsense"], [""]])("%p falls back to the default", (input) => {
     expect(parseSyncPolicy(input)).toBe(DEFAULT_CONFIG.syncPolicy);
+  });
+
+  test("the default never rewrites history", () => {
+    expect(DEFAULT_CONFIG.syncPolicy).toBe("check");
+  });
+});
+
+describe("parseConflictMode", () => {
+  test("block unless told to warn", () => {
+    expect(parseConflictMode("warn")).toBe("warn");
+    expect(parseConflictMode("WARN")).toBe("warn");
+    expect(parseConflictMode(null)).toBe("block");
+    expect(parseConflictMode("nonsense")).toBe("block");
+  });
+});
+
+describe("parseLongLived", () => {
+  test("unset keeps the defaults", () => {
+    expect(parseLongLived([])).toBe(DEFAULT_CONFIG.longLived);
+  });
+
+  test("values replace the defaults; separators may be spaces or commas", () => {
+    expect(parseLongLived(["release/* develop", "qa,uat"])).toEqual([
+      "release/*",
+      "develop",
+      "qa",
+      "uat",
+    ]);
+  });
+
+  test("an empty value means no long-lived branches at all", () => {
+    expect(parseLongLived([""])).toEqual([]);
   });
 });
 

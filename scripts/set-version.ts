@@ -3,7 +3,7 @@
  * Single source of truth for pull-pal's version.
  *
  * The canonical version lives in the root package.json. Every other channel
- * manifest (npm shim, platform packages, Python, Homebrew) is derived from it,
+ * manifest (npm shim, platform packages, Homebrew) is derived from it,
  * so they can never drift apart again.
  *
  * Usage:
@@ -34,17 +34,15 @@ const TARGETS: Target[] = [
     file: "npm/package.json",
     patterns: [
       /"version":\s*"([^"]+)"/,
-      // optionalDependencies pins to the four platform packages
-      /"@nikeproduct\/pull-pal-(?:darwin-arm64|darwin-x64|linux-x64|win32-x64)":\s*"([^"]+)"/g,
+      // optionalDependencies pins to the platform packages
+      /"@nikeproduct\/pull-pal-(?:darwin-arm64|darwin-x64|linux-x64|linux-arm64|win32-x64)":\s*"([^"]+)"/g,
     ],
   },
   { file: "npm-packages/darwin-arm64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
   { file: "npm-packages/darwin-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
   { file: "npm-packages/linux-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
+  { file: "npm-packages/linux-arm64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
   { file: "npm-packages/win32-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
-  { file: "python/pyproject.toml", patterns: [/^version = "([^"]+)"/m] },
-  { file: "python/pull_pal/__init__.py", patterns: [/__version__ = "([^"]+)"/] },
-  { file: "python/pull_pal/cli.py", patterns: [/^VERSION = "([^"]+)"/m] },
   { file: "Formula/pull-pal.rb", patterns: [/^  version "([^"]+)"/m] },
 ];
 

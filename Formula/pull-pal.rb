@@ -1,5 +1,5 @@
 class PullPal < Formula
-  desc "Git push wrapper: keeps your branch in sync and gates the push on your tests"
+  desc "Git push that checks your branch merges and your tests pass first"
   homepage "https://github.com/nikeproduct/pull-pal"
   version "0.2.0"
   license "MIT"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Publishes all npm packages in the correct order:
- *   1. Four platform-specific packages (@nikeproduct/pull-pal-*)
+ *   1. Five platform-specific packages (@nikeproduct/pull-pal-*)
  *   2. Main pull-pal package (depends on the above via optionalDependencies)
  *
  * Usage:
@@ -18,6 +18,7 @@ const packages = [
   join(ROOT, "npm-packages", "darwin-arm64"),
   join(ROOT, "npm-packages", "darwin-x64"),
   join(ROOT, "npm-packages", "linux-x64"),
+  join(ROOT, "npm-packages", "linux-arm64"),
   join(ROOT, "npm-packages", "win32-x64"),
   join(ROOT, "npm"),
 ];

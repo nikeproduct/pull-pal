@@ -6,8 +6,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { EXIT } from "../../src/core/errors";
-import { withRepo } from "../helpers/fixture";
+import { type makeRepo, withRepo } from "../helpers/fixture";
 
 describe("informational commands", () => {
   test("--version prints just the version", async () => {
@@ -53,8 +55,9 @@ describe("push", () => {
     });
   });
 
-  test("rebases and force-pushes when behind the default branch", async () => {
+  test("pullpal.sync=rebase rebases and force-pushes when behind", async () => {
     await withRepo(async (repo) => {
+      repo.git(["config", "pullpal.sync", "rebase"]);
       repo.advanceRemote("main", "teammate");
       repo.commit("mine", { "mine.txt": "mine" });
 
@@ -71,6 +74,7 @@ describe("push", () => {
 
   test("--dry-run prints the plan and changes nothing", async () => {
     await withRepo(async (repo) => {
+      repo.git(["config", "pullpal.sync", "rebase"]);
       repo.advanceRemote("main", "teammate");
       const before = repo.sha("HEAD");
       const remoteBefore = repo.git(["ls-remote", repo.remoteDir, "refs/heads/main"]).stdout;
@@ -133,6 +137,91 @@ describe("push", () => {
 
       expect(repo.sha("HEAD")).toBe(before);
       expect(r.stderr).toContain("disabled");
+    });
+  });
+});
+
+/**
+ * The two cases from the v0.2 review, through the real CLI. Both used to plan a
+ * rebase onto origin/main followed by `git push --force-with-lease`.
+ */
+describe("review regressions", () => {
+  function setUp(repo: ReturnType<typeof makeRepo>) {
+    repo.git(["checkout", "-q", "-b", "release/1.0"]);
+    repo.commit("rel fix", { "rel.txt": "r" });
+    repo.git(["push", "-q", "-u", "origin", "release/1.0"]);
+    repo.git(["checkout", "-q", "main"]);
+    repo.git(["checkout", "-q", "-b", "feature-a"]);
+    repo.commit("a", { "a.txt": "a" });
+    repo.git(["push", "-q", "-u", "origin", "feature-a"]);
+    repo.git(["checkout", "-q", "main"]);
+    repo.git(["checkout", "-q", "-b", "feature-x"]);
+    repo.commit("x", { "x.txt": "x" });
+    repo.git(["push", "-q", "-u", "origin", "feature-x"]);
+    repo.advanceRemote("main", "main moved");
+  }
+
+  for (const policy of ["check", "rebase"]) {
+    test(`[${policy}] pushing another branch: no sync, no lease`, async () => {
+      await withRepo(async (repo) => {
+        setUp(repo);
+        repo.git(["config", "pullpal.sync", policy]);
+        repo.git(["checkout", "-q", "feature-a"]);
+
+        const r = await repo.runPullPal(["--dry-run", "--no-tests", "origin", "feature-x"]);
+
+        expect(r.exitCode).toBe(EXIT.ok);
+        expect(r.stderr).toContain("not the checked-out branch");
+        expect(r.stderr).toContain("push:    git push origin feature-x");
+        expect(r.stderr).not.toContain("--force-with-lease");
+      });
+    });
+
+    test(`[${policy}] a release branch is not synced with main`, async () => {
+      await withRepo(async (repo) => {
+        setUp(repo);
+        repo.git(["config", "pullpal.sync", policy]);
+        repo.git(["checkout", "-q", "release/1.0"]);
+
+        const r = await repo.runPullPal(["--dry-run", "--no-tests"]);
+
+        expect(r.exitCode).toBe(EXIT.ok);
+        expect(r.stderr).toContain("long-lived");
+        expect(r.stderr).not.toContain("--force-with-lease");
+      });
+    });
+  }
+});
+
+describe("test cache across runs", () => {
+  /** Records each run in a file outside the work tree (see hook.test.ts). */
+  const RECORD = "echo run >> ../runs.txt";
+  const runs = (repo: ReturnType<typeof makeRepo>) => {
+    try {
+      return readFileSync(join(repo.dir, "..", "runs.txt"), "utf8")
+        .split(/\r?\n/)
+        .filter(Boolean).length;
+    } catch {
+      return 0;
+    }
+  };
+
+  test("a second run on the same commit skips the suite; --retest forces it", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["config", "pullpal.testCommand", RECORD]);
+      repo.commit("work", { "a.txt": "a" });
+
+      expect((await repo.runPullPal([])).exitCode).toBe(EXIT.ok);
+      const second = await repo.runPullPal([]);
+      expect(runs(repo)).toBe(1);
+      expect(second.stderr).toContain("already passed for this exact commit");
+
+      await repo.runPullPal(["--retest"]);
+      expect(runs(repo)).toBe(2);
+
+      repo.git(["config", "pullpal.testCache", "off"]);
+      await repo.runPullPal([]);
+      expect(runs(repo)).toBe(3);
     });
   });
 });

@@ -18,9 +18,23 @@
 >    merely-behind push duplicated git's own non-fast-forward rejection and made
 >    pull-pal obstructive where plain git is already correct.
 >
+> **Post-review changes (2026-10).** A product review changed the shape of §5
+> and §8 before release; the CHANGELOG has the user-facing detail:
+>
+> 3. **The default sync is `check`, not rebase.** Being behind is reported;
+>    only a conflict with the base branch (found in memory by
+>    `git merge-tree --write-tree`) blocks. Rebasing is opt-in
+>    (`pullpal.sync=rebase`), and the hook no longer blocks on behind-ness.
+> 4. **pull-pal vouches only for the checked-out branch.** A push of anything
+>    else gets no sync, tests, or lease; long-lived branches are never synced
+>    with the default branch; `branch.<name>.pullpalBase` overrides the base.
+> 5. **Tests run on exactly the pushed commit** (uncommitted and untracked
+>    changes are stashed around the run), and passing trees are cached.
+> 6. **The pip channel was dropped** (§8); a linux-arm64 binary was added.
+>
 > Before shipping, the release still needs three things only a human can do:
 > create the `nikeproduct/homebrew-pull-pal` tap repository, add the
-> `NPM_TOKEN` / `PYPI_TOKEN` / `TAP_TOKEN` secrets, and bump the version with
+> `NPM_TOKEN` / `TAP_TOKEN` secrets, and bump the version with
 > `bun run set-version 0.2.0`.
 
 ---

@@ -8,22 +8,33 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXIT } from "../../src/core/errors";
 import { withRepo } from "../helpers/fixture";
 import type { Fixture } from "../helpers/fixture";
 
-/** Count how many times the stubbed suite ran, via an append-only marker file. */
+/**
+ * Count how many times the stubbed suite ran, via an append-only marker file.
+ * It lives *outside* the work tree: pull-pal sets untracked files aside while the
+ * tests run, and a marker inside the repo would be one of them.
+ */
 function testRunCount(repo: Fixture): number {
-  const marker = join(repo.dir, "testruns.txt");
+  const marker = join(repo.dir, "..", "testruns.txt");
   if (!existsSync(marker)) return 0;
   return readFileSync(marker, "utf8").split(/\r?\n/).filter(Boolean).length;
 }
 
 /** A test command that records each run and succeeds; works in sh and cmd. */
-const RECORDING_PASS = "echo run >> testruns.txt";
-const RECORDING_FAIL = "echo run >> testruns.txt && exit 1";
+const RECORDING_PASS = "echo run >> ../testruns.txt";
+const RECORDING_FAIL = "echo run >> ../testruns.txt && exit 1";
+
+/** Publish a feature branch off main, so the default-branch check applies to it. */
+function onFeatureBranch(repo: Fixture, files: Record<string, string> = { "f.txt": "f\n" }) {
+  repo.git(["checkout", "-q", "-b", "feature"]);
+  repo.commit("feature work", files);
+  repo.git(["push", "-q", "-u", "origin", "feature"]);
+}
 
 function remoteSha(repo: Fixture, branch = "main"): string {
   return (
@@ -53,43 +64,110 @@ describe("gate behaviour under real git push", () => {
   });
 
   /**
-   * The defining v0.1 failure. It rebased inside the hook and then pushed, but
-   * git had already resolved the pre-rebase sha, so the user ended up rebased
-   * and *not* pushed. The gate refuses instead, and leaves history alone.
+   * Being behind main is not a reason to block: on an active repository it is
+   * true of nearly every push, and CI tests the merge result anyway.
    */
-  test("being behind blocks the push and does not touch local history", async () => {
+  test("behind main but merging cleanly: the push goes through untouched", async () => {
     await withRepo(async (repo) => {
       await install(repo);
       repo.git(["config", "pullpal.tests", "off"]);
+      onFeatureBranch(repo);
       repo.advanceRemote("main", "teammate");
-      const localBefore = repo.commit("mine", { "mine.txt": "mine" });
-      const remoteBefore = remoteSha(repo);
+      const sha = repo.commit("mine", { "mine.txt": "mine" });
 
-      const push = repo.git(["push", "origin", "main"]);
+      const push = repo.git(["push", "origin", "feature"]);
 
-      expect(push.exitCode).not.toBe(0);
-      expect(push.stderr).toContain("Push blocked");
-      expect(push.stderr).toContain("Run pull-pal");
-      // No rebase happened, and nothing reached the remote.
-      expect(repo.sha("HEAD")).toBe(localBefore);
-      expect(remoteSha(repo)).toBe(remoteBefore);
-      expect(repo.git(["rev-parse", "--git-path", "rebase-merge"]).exitCode).toBe(0);
+      expect(push.exitCode).toBe(0);
+      expect(remoteSha(repo, "feature")).toBe(sha);
+      expect(push.stderr).not.toContain("Push blocked");
     });
   });
 
-  test("the blocked push is resolved by running pull-pal, exactly as instructed", async () => {
+  /**
+   * The defining v0.1 failure was rebasing inside the hook after git had already
+   * resolved the pre-rebase sha. The gate never rewrites anything: it refuses.
+   */
+  test("a branch that no longer merges with main is blocked, history untouched", async () => {
     await withRepo(async (repo) => {
       await install(repo);
       repo.git(["config", "pullpal.tests", "off"]);
-      repo.advanceRemote("main", "teammate");
+      onFeatureBranch(repo, { "README.md": "feature version\n" });
+      repo.advanceRemote("main", "teammate", { "README.md": "main version\n" });
+      const remoteBefore = remoteSha(repo, "feature");
+      const localBefore = repo.commit("mine", { "mine.txt": "mine" });
+
+      const push = repo.git(["push", "origin", "feature"]);
+
+      expect(push.exitCode).not.toBe(0);
+      expect(push.stderr).toContain("Push blocked");
+      expect(push.stderr).toContain("README.md");
+      expect(push.stderr).toContain("--no-verify");
+      expect(repo.sha("HEAD")).toBe(localBefore);
+      expect(remoteSha(repo, "feature")).toBe(remoteBefore);
+      expect(repo.git(["status", "--porcelain"]).stdout).toBe("");
+    });
+  });
+
+  test("with pullpal.sync=rebase the hook points at pull-pal, which rebases", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      repo.git(["config", "pullpal.tests", "off"]);
+      repo.git(["config", "pullpal.sync", "rebase"]);
+      onFeatureBranch(repo);
+      const teammate = repo.advanceRemote("main", "teammate");
       repo.commit("mine", { "mine.txt": "mine" });
 
-      expect(repo.git(["push", "origin", "main"]).exitCode).not.toBe(0);
+      const push = repo.git(["push", "origin", "feature"]);
+      expect(push.exitCode).toBe(0);
+      expect(push.stderr).toContain("Run pull-pal to rebase");
 
       const r = await repo.runPullPal([]);
 
       expect(r.exitCode).toBe(EXIT.ok);
-      expect(remoteSha(repo)).toBe(repo.sha("HEAD"));
+      expect(repo.git(["merge-base", "--is-ancestor", teammate, "HEAD"]).exitCode).toBe(0);
+      expect(remoteSha(repo, "feature")).toBe(repo.sha("HEAD"));
+    });
+  });
+
+  test("a push of a branch other than the checked-out one skips the checks", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["branch", "other"]);
+      repo.commit("main moves on", { "m.txt": "m" });
+      repo.git(["checkout", "-q", "other"]);
+      const otherSha = repo.commit("other work", { "o.txt": "o" });
+      repo.git(["checkout", "-q", "main"]);
+
+      await install(repo);
+      repo.git(["config", "pullpal.testCommand", RECORDING_FAIL]);
+
+      // Testing main's working tree would say nothing about "other".
+      const push = repo.git(["push", "origin", "other"]);
+
+      expect(push.exitCode).toBe(0);
+      expect(testRunCount(repo)).toBe(0);
+      expect(remoteSha(repo, "other")).toBe(otherSha);
+      expect(push.stderr).toContain("checks only the checked-out branch");
+    });
+  });
+
+  test("the tests see the commit being pushed, not uncommitted files", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      // Records what the suite could see; works under sh and cmd alike.
+      repo.git([
+        "config",
+        "pullpal.testCommand",
+        "git ls-files --others --exclude-standard > ../seen-by-tests.txt",
+      ]);
+      repo.commit("work", { "a.txt": "a" });
+      repo.writeFile("not-added.txt", "forgot to git add this\n");
+
+      const push = repo.git(["push", "origin", "main"]);
+
+      expect(push.exitCode).toBe(0);
+      expect(readFileSync(join(repo.dir, "..", "seen-by-tests.txt"), "utf8").trim()).toBe("");
+      expect(existsSync(join(repo.dir, "not-added.txt"))).toBe(true);
+      expect(repo.git(["stash", "list"]).stdout).toBe("");
     });
   });
 
@@ -176,7 +254,7 @@ describe("gate behaviour under real git push", () => {
       await install(repo);
       repo.git(["config", "pullpal.tests", "off"]);
 
-      // A second remote whose main is ahead of ours, while origin stays current.
+      // A second remote whose main conflicts with ours, while origin stays current.
       const otherDir = join(repo.dir, "..", "other.git");
       expect(repo.git(["clone", "--quiet", "--bare", repo.remoteDir, otherDir]).exitCode).toBe(0);
       expect(repo.git(["remote", "add", "other", otherDir]).exitCode).toBe(0);
@@ -185,10 +263,11 @@ describe("gate behaviour under real git push", () => {
       repo.git(["-C", scratch, "config", "user.email", "test@pull-pal.dev"]);
       repo.git(["-C", scratch, "config", "user.name", "Pull Pal Test"]);
       repo.git(["-C", scratch, "config", "commit.gpgsign", "false"]);
-      expect(repo.git(["-C", scratch, "commit", "--allow-empty", "-m", "ahead"]).exitCode).toBe(0);
+      writeFileSync(join(scratch, "README.md"), "theirs\n");
+      expect(repo.git(["-C", scratch, "commit", "-qam", "conflicting"]).exitCode).toBe(0);
       expect(repo.git(["-C", scratch, "push", "--quiet", "origin", "main"]).exitCode).toBe(0);
 
-      repo.commit("mine", { "mine.txt": "mine" });
+      repo.commit("mine", { "README.md": "ours\n" });
       const push = repo.git(["push", "other", "main"]);
 
       expect(push.exitCode).not.toBe(0);
@@ -197,19 +276,20 @@ describe("gate behaviour under real git push", () => {
     });
   });
 
-  test("pullpal.hookGate=warn lets an out-of-date push through", async () => {
+  test("pullpal.onConflict=warn lets a conflicting push through", async () => {
     await withRepo(async (repo) => {
       await install(repo);
       repo.git(["config", "pullpal.tests", "off"]);
-      repo.git(["config", "pullpal.hookGate", "warn"]);
-      repo.advanceRemote("main", "teammate");
-      repo.commit("mine", { "mine.txt": "mine" });
+      repo.git(["config", "pullpal.onConflict", "warn"]);
+      onFeatureBranch(repo, { "README.md": "feature version\n" });
+      repo.advanceRemote("main", "teammate", { "README.md": "main version\n" });
+      const sha = repo.commit("mine", { "mine.txt": "mine" });
 
-      const push = repo.git(["push", "origin", "main"]);
+      const push = repo.git(["push", "origin", "feature"]);
 
-      // The gate warned but allowed it; git then rejects it as non-fast-forward,
-      // which is git's own correct behaviour, not pull-pal blocking.
-      expect(push.stderr).toContain("Run pull-pal to rebase");
+      expect(push.exitCode).toBe(0);
+      expect(push.stderr).toContain("conflict with origin/main");
+      expect(remoteSha(repo, "feature")).toBe(sha);
     });
   });
 });

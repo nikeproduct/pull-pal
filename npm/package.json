@@ -1,7 +1,7 @@
 {
   "name": "pull-pal",
   "version": "0.2.0",
-  "description": "Git push wrapper that auto-fetches, rebases against the default branch, and runs tests before pushing",
+  "description": "A git push that checks your branch still merges with main and your tests pass on exactly what you push",
   "bin": {
     "pull-pal": "run.js"
   },
@@ -17,12 +17,14 @@
     "@nikeproduct/pull-pal-darwin-arm64": "0.2.0",
     "@nikeproduct/pull-pal-darwin-x64": "0.2.0",
     "@nikeproduct/pull-pal-linux-x64": "0.2.0",
+    "@nikeproduct/pull-pal-linux-arm64": "0.2.0",
     "@nikeproduct/pull-pal-win32-x64": "0.2.0"
   },
   "keywords": [
     "git",
     "push",
     "rebase",
+    "pre-push",
     "test",
     "cli",
     "pull-pal"

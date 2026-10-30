@@ -14,6 +14,8 @@ export const EXIT = {
   blocked: 1,
   /** Repo/env is not in a state pull-pal can work with (preflight failures). */
   preflight: 2,
+  /** Interrupted (Ctrl+C) while the tests ran — 128 + SIGINT, by convention. */
+  interrupted: 130,
   /** Unexpected internal error. */
   internal: 70,
 } as const;

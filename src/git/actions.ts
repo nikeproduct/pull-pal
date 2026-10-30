@@ -48,6 +48,70 @@ export function rebase(git: GitRunner, onto: string): RebaseResult {
   };
 }
 
+/** Identifies our stash entry, so the user can find it if a restore ever fails. */
+export const STASH_MESSAGE = "pull-pal: uncommitted changes set aside while tests ran";
+
+export type SetAside =
+  /** Nothing uncommitted — the working tree already is HEAD. */
+  | { kind: "clean" }
+  /** Stashed. `isolated` is false when something could not be stashed (submodules). */
+  | { kind: "stashed"; stash: string; isolated: boolean }
+  /** Changes exist but none could be stashed; tests would see them. */
+  | { kind: "not-isolated" }
+  | { kind: "failed"; message: string };
+
+function porcelain(git: GitRunner): string | null {
+  const r = git.capture(["status", "--porcelain"]);
+  return r.exitCode === 0 ? r.stdout : null;
+}
+
+function stashTip(git: GitRunner): string | null {
+  const r = git.capture(["rev-parse", "--verify", "--quiet", "refs/stash"]);
+  return r.exitCode === 0 && r.stdout ? r.stdout : null;
+}
+
+/**
+ * Stash uncommitted *and untracked* changes so the tests run against exactly the
+ * commit being pushed. A file you forgot to `git add` is the classic way for
+ * tests to pass locally and fail everywhere else; this is what catches it.
+ *
+ * Ignored files stay put — build output and node_modules are environment, not
+ * code, and removing them would make every test run a cold one.
+ */
+export function setAsideChanges(git: GitRunner): SetAside {
+  const before = porcelain(git);
+  if (before === null) return { kind: "failed", message: "could not read the working tree status" };
+  if (before === "") return { kind: "clean" };
+
+  const previousTip = stashTip(git);
+  const r = git.capture(["stash", "push", "--include-untracked", "--message", STASH_MESSAGE]);
+  if (r.exitCode !== 0) return { kind: "failed", message: r.stderr || r.stdout };
+
+  const tip = stashTip(git);
+  if (!tip || tip === previousTip) return { kind: "not-isolated" };
+  return { kind: "stashed", stash: tip, isolated: porcelain(git) === "" };
+}
+
+/**
+ * Put stashed changes back. Pops by position, after locating *our* entry by its
+ * sha, so a stash the tests themselves created is never the one restored.
+ * Git refuses rather than overwrites when something is in the way, so a failure
+ * here never loses work — the entry simply stays in the stash.
+ */
+export function restoreChanges(git: GitRunner, stash: string): ActionResult {
+  const list = git.capture(["stash", "list", "--format=%H"]);
+  const index = list.stdout.split(/\r?\n/).indexOf(stash);
+  if (index === -1) return { ok: false, message: "the stash entry is no longer in the stash list" };
+
+  const entry = `stash@{${index}}`;
+  const withIndex = git.capture(["stash", "pop", "--index", entry]);
+  if (withIndex.exitCode === 0) return { ok: true, message: "" };
+  // --index also restores what was staged; if that cannot apply, the content
+  // matters more than the staging.
+  const plain = git.capture(["stash", "pop", entry]);
+  return { ok: plain.exitCode === 0, message: plain.stderr || plain.stdout };
+}
+
 export interface PushOptions {
   /** Attach the user's terminal so they see git's progress output. */
   passthrough?: boolean;

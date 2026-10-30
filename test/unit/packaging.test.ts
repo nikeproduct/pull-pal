@@ -20,6 +20,7 @@ const PLATFORMS = [
   { dir: "darwin-arm64", pkg: "@nikeproduct/pull-pal-darwin-arm64", bin: "pull-pal", os: "darwin" },
   { dir: "darwin-x64", pkg: "@nikeproduct/pull-pal-darwin-x64", bin: "pull-pal", os: "darwin" },
   { dir: "linux-x64", pkg: "@nikeproduct/pull-pal-linux-x64", bin: "pull-pal", os: "linux" },
+  { dir: "linux-arm64", pkg: "@nikeproduct/pull-pal-linux-arm64", bin: "pull-pal", os: "linux" },
   { dir: "win32-x64", pkg: "@nikeproduct/pull-pal-win32-x64", bin: "pull-pal.exe", os: "win32" },
 ] as const;
 
@@ -42,18 +43,6 @@ describe("version consistency", () => {
   test.each([
     ["npm/package.json", () => readJson<PackageJson>("npm/package.json").version],
     ["src/version.ts", () => read("src/version.ts").match(/VERSION = "([^"]+)"/)?.[1]],
-    [
-      "python/pyproject.toml",
-      () => read("python/pyproject.toml").match(/^version = "([^"]+)"/m)?.[1],
-    ],
-    [
-      "python/pull_pal/cli.py",
-      () => read("python/pull_pal/cli.py").match(/^VERSION = "([^"]+)"/m)?.[1],
-    ],
-    [
-      "python/pull_pal/__init__.py",
-      () => read("python/pull_pal/__init__.py").match(/"([^"]+)"/)?.[1],
-    ],
     [
       "Formula/pull-pal.rb",
       () => read("Formula/pull-pal.rb").match(/^ {2}version "([^"]+)"/m)?.[1],
@@ -92,10 +81,22 @@ describe("npm packaging", () => {
       const manifest = readJson<PackageJson>(`npm-packages/${dir}/package.json`);
       expect(manifest.name).toBe(pkg);
       expect(manifest.os).toEqual([os]);
+      expect(manifest.cpu).toEqual([dir.slice(dir.indexOf("-") + 1)]);
       // Shipping the binary is the entire purpose of the package.
       expect(manifest.files).toContain(bin);
     });
   }
+
+  test("the build compiles, and publishing ships, every platform package", () => {
+    const build = read("scripts/build.ts");
+    const publish = read("scripts/publish-npm.ts");
+    for (const { dir } of PLATFORMS) {
+      expect(build).toContain(`pkgDir: "${dir}"`);
+      expect(publish).toContain(`"${dir}"`);
+      // The compiled binary is generated, never committed.
+      expect(read(".gitignore")).toContain(`npm-packages/${dir}/`);
+    }
+  });
 
   test.each(["npm/run.js", "npm/install.js"])("%s knows every platform package", (file) => {
     const source = read(file);
@@ -142,31 +143,14 @@ describe("homebrew formula", () => {
   });
 });
 
-describe("python packaging", () => {
-  test("the release URL is derived from the declared version", () => {
-    const cli = read("python/pull_pal/cli.py");
-    expect(cli).toContain(
-      'RELEASE_BASE = f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}"',
-    );
-  });
-
-  test("the launcher verifies what it downloads", () => {
-    const cli = read("python/pull_pal/cli.py");
-    expect(cli).toContain("hashlib.sha256");
-    expect(cli).toContain("checksum verification");
-    // Atomic install: never leave a half-written executable in the cache.
-    expect(cli).toContain("os.replace");
-    expect(cli).toContain("DOWNLOAD_TIMEOUT_SECONDS");
-  });
-
-  test("the wheel is configured to ship the checksum manifest", () => {
-    // It is git-ignored, so hatchling would otherwise drop it silently.
-    expect(read("python/pyproject.toml")).toContain('artifacts = ["pull_pal/SHA256SUMS"]');
-  });
-
-  test("the readme pyproject declares actually exists", () => {
-    expect(read("python/pyproject.toml")).toContain('readme = "README.md"');
-    expect(read("python/README.md")).toContain("pull-pal");
+describe("dropped channels", () => {
+  // pip was never published; it shipped a downloader for a binary npm and
+  // Homebrew already deliver. It can come back when someone asks for it.
+  test("nothing still builds, versions, or releases a pip package", () => {
+    for (const file of ["scripts/build.ts", "scripts/set-version.ts", ".github/workflows/ci.yml"]) {
+      expect(read(file)).not.toMatch(/python|pypi/i);
+    }
+    expect(read(".github/workflows/release.yml")).not.toContain("twine");
   });
 });
 
@@ -179,7 +163,7 @@ describe("repository hygiene", () => {
 
   test("generated artifacts are not committed", () => {
     const ignore = read(".gitignore");
-    for (const path of ["dist/", "node_modules/", "python/pull_pal/SHA256SUMS"]) {
+    for (const path of ["dist/", "node_modules/"]) {
       expect(ignore).toContain(path);
     }
   });

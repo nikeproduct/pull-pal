@@ -1,15 +1,16 @@
 # pull-pal
 
-A `git push` wrapper that keeps your branch in sync and refuses to push code
-whose tests fail.
+A `git push` that first checks two things git does not: that your branch still
+merges cleanly with `main`, and that your tests pass on exactly what you are
+pushing.
 
 ```sh
 pull-pal
 ```
 
-It fetches, rebases onto the default branch if you are behind, runs your test
-suite (auto-detected), and pushes — with `--force-with-lease` when the rebase
-rewrote history, and never at all if the tests fail.
+It fetches, checks your branch against the default branch for conflicts, runs
+your test suite (auto-detected) against the commit being pushed, and pushes.
+It never rewrites your history unless you ask it to.
 
 Works with any language. Nothing to configure.
 
@@ -18,14 +19,13 @@ Works with any language. Nothing to configure.
 ## Install
 
 ```sh
-npm install -g pull-pal      # Node / Bun projects
-pip install pull-pal         # Python projects
+npm install -g pull-pal
 brew install nikeproduct/pull-pal/pull-pal
 ```
 
-The npm package ships the binary for your platform as an optional dependency.
-The pip package downloads it on first run, verifies it against checksums shipped
-inside the package, and caches it in `~/.pull-pal/bin/<version>/`.
+Binaries for macOS (arm64, x64), Linux (x64, arm64), and Windows (x64) are
+also attached to every [GitHub release](https://github.com/nikeproduct/pull-pal/releases),
+with a `SHA256SUMS` file to verify them.
 
 ---
 
@@ -46,8 +46,9 @@ Anything pull-pal does not recognise goes straight to `git push`, including
 
 | Flag | Description |
 |---|---|
-| `--no-sync` | Skip the fetch and rebase steps entirely |
+| `--no-sync` | Skip the fetch and sync steps entirely |
 | `--no-tests` | Skip the test runner step |
+| `--retest` | Run the tests even if this commit already passed |
 | `--dry-run` | Print exactly what would happen, change nothing |
 | `--help` | Show help |
 | `--version` | Print the version |
@@ -70,23 +71,83 @@ Start with `pull-pal --dry-run` if you want to see the plan before trusting it.
 ```
 → Fetching origin...
 ✓ Fetched
-→ Rebasing onto origin/main (behind origin/main by 2 commits)...
-✓ Rebased onto origin/main
+✓ behind origin/main by 4 commits — merges cleanly
+Set aside uncommitted changes — testing exactly what will be pushed
 → Running bun run test
   ... your test output ...
+Restored your uncommitted changes
 ✓ Tests passed
-⚠ Rebase rewrote history — pushing with --force-with-lease
 → Pushing...
 ✓ Pushed successfully
 ```
 
-If tests fail, the push does not happen and pull-pal exits with the test
-runner's own exit code.
+### It blocks on conflicts, not on being behind
 
-### When it refuses
+Being behind `main` is normal, and on an active repository it is true of almost
+every push. Your CI already tests your branch merged with `main`. What actually
+needs your attention is a branch that **no longer merges**, so that is what
+pull-pal checks. It runs `git merge-tree` entirely in memory, with no checkout and
+nothing to clean up afterwards:
 
-pull-pal stops before doing anything destructive if the remote branch has
-commits you have not incorporated:
+```
+✗ Your branch no longer merges cleanly — 2 files conflict with origin/main: src/api.ts, src/db.ts.
+  Bring it up to date and resolve them first: git rebase origin/main  (or: git merge origin/main)
+```
+
+The conflict check needs git 2.38 or later. On older git, pull-pal says so and
+carries on.
+
+### It tests exactly what you push
+
+Tests run against the commit being pushed, not your working directory.
+Uncommitted and untracked files are stashed while the suite runs and restored
+afterwards, so a file you forgot to `git add` fails here instead of in CI. This
+also happens if the tests fail or you press Ctrl+C. Ignored files (build
+output, `node_modules`) stay where they are.
+
+If changes ever cannot be restored automatically (for example, the test run
+created a file with the same name), pull-pal stops before pushing and tells you
+where they are. They are kept in `git stash`, so nothing is lost.
+
+### It does not re-run tests for a commit that already passed
+
+A passing run is remembered by the commit's tree and the test command. Pushing
+the same commit again, such as a retry after a network error or a run after the
+hook already tested it, skips the suite. Use `--retest` to force a run, or
+`git config pullpal.testCache off` to turn this off.
+
+### It only vouches for the branch you have checked out
+
+pull-pal checks your checked-out branch. If you push something else, such as
+`pull-pal origin other-branch` or `--all`, it says so and hands the push to git
+unchanged: no sync, no tests, and no `--force-with-lease`.
+
+Long-lived branches (`main`, `master`, `develop`, `release/*`, `hotfix/*`, and
+similar) are never compared with or rebased onto the default branch. A release
+branch is meant to lack `main`'s newer commits.
+
+---
+
+## Rebasing, if you want it
+
+```sh
+git config pullpal.sync rebase
+```
+
+With `rebase`, pull-pal rebases your branch onto the default branch when it is
+behind and the rebase will apply cleanly, then pushes with `--force-with-lease`:
+
+```
+→ Rebasing onto origin/main (behind origin/main by 2 commits)...
+✓ Rebased onto origin/main
+⚠ Rebase rewrote history — pushing with --force-with-lease
+```
+
+Rebases run with `--autostash`. If a rebase still conflicts partway through,
+pull-pal aborts it and puts your branch back exactly as it was.
+
+It refuses to force-push over commits on your remote branch that you have not
+incorporated, such as a teammate's push:
 
 ```
 ✗ origin/my-feature has 1 commit you do not have — the force-push after
@@ -95,17 +156,11 @@ commits you have not incorporated:
   if you are certain you want to replace the remote branch.
 ```
 
-This is a case `--force-with-lease` alone cannot catch, because pull-pal has
-just fetched the very ref the lease compares against.
+`--force-with-lease` alone cannot catch this case, because pull-pal has just
+fetched the very ref the lease compares against.
 
-It also refuses to start on a detached HEAD, mid-rebase, mid-merge, or in a repo
-with no remotes — each with the specific command that fixes it.
-
-### Your uncommitted work is safe
-
-Rebases run with `--autostash`, so a dirty working tree is stashed and restored.
-If the rebase conflicts, pull-pal aborts it and puts your branch back exactly as
-it was — it never leaves you stranded mid-rebase.
+pull-pal also refuses to start on a detached HEAD, mid-rebase, mid-merge, or in
+a repo with no remotes, and prints the command that fixes each one.
 
 ---
 
@@ -115,25 +170,25 @@ it was — it never leaves you stranded mid-rebase.
 pull-pal setup
 ```
 
-This installs a `pre-push` hook, so every push — terminal, IDE, or GUI client —
-is checked first.
+This installs a `pre-push` hook, so every push is checked first, whether it
+comes from the terminal, an IDE, or a GUI client.
 
-**The hook validates; it never rewrites history or pushes.** Git decides which
-commits it is pushing *before* the hook runs, so a hook that rebased would leave
-you rebased and unpushed. Instead, when your branch is behind, the hook blocks
-the push and tells you to run `pull-pal`, which does the whole job correctly:
+**The hook validates. It never rewrites history and never pushes.** It blocks
+for exactly two reasons: your branch conflicts with its base, or the tests fail.
 
 ```
-✗ Push blocked: your branch is behind origin/main by 2 commits.
-  Run pull-pal — it will rebase and push for you.
+✗ Push blocked: Your branch no longer merges cleanly — 1 file conflicts with origin/main: README.md.
+  Bring it up to date and resolve them first: git rebase origin/main  (or: git merge origin/main)
   To push anyway, bypass the hook: git push --no-verify
 ```
 
-The hook only blocks for those two reasons — out of sync, or failing tests.
-Anything else it cannot make sense of (an odd repo state, a missing test tool,
-an undeterminable default branch) produces a warning and lets the push through.
+Anything else it cannot make sense of produces a warning and lets the push
+through. That includes an odd repo state, a missing test tool, an undeterminable
+default branch, or a push of a branch you do not have checked out. With
+`pullpal.sync=rebase`, a branch that is merely behind gets a reminder to run
+`pull-pal`, which does the rebase properly.
 
-Prefer advice over enforcement? `git config pullpal.hookGate warn`.
+Prefer a warning to a block? `git config pullpal.onConflict warn`.
 
 Uninstall with `pull-pal remove-hook`. A pre-push hook pull-pal did not write is
 never modified or deleted.
@@ -157,13 +212,20 @@ The first match wins:
 | `Gemfile` + a `spec/` directory | `bundle exec rspec` |
 | `Gemfile` | `bundle exec rake test` |
 
-The package manager is chosen from your project — the `packageManager` field,
-then lockfiles — not from what happens to be installed on your machine.
+The package manager is chosen from your project (the `packageManager` field,
+then lockfiles), not from whatever happens to be installed on your machine.
 
 Two things deliberately count as "no test runner": the placeholder `npm init`
 writes (`echo "Error: no test specified" && exit 1`), and a `pyproject.toml`
 that never mentions pytest. If nothing is detected, or the detected tool is not
 on your PATH, pull-pal warns and pushes anyway rather than blocking you.
+
+A slow suite is the most common reason people bypass a pre-push check. If yours
+takes minutes, point pull-pal at a faster subset and leave the full run to CI:
+
+```sh
+git config pullpal.testCommand "npm run test:quick"
+```
 
 `pull-pal doctor` shows what was detected and which rule matched.
 
@@ -171,20 +233,35 @@ on your PATH, pull-pal warns and pushes anyway rather than blocking you.
 
 ## Configuration
 
-Configuration lives in `git config`, so it layers per-repo over global:
+Configuration lives in `git config`, so per-repo settings layer over global ones:
 
 ```sh
-git config pullpal.sync default|upstream|off   # what to rebase onto (default: default)
-git config pullpal.tests on|off                # run tests before pushing (default: on)
-git config pullpal.testCommand "make check"    # override detection
-git config pullpal.hookGate block|warn         # hook behaviour when out of sync
+git config pullpal.sync check|rebase|upstream|off   # how to sync (default: check)
+git config pullpal.onConflict block|warn            # when the branch no longer merges (default: block)
+git config pullpal.tests on|off                     # run tests before pushing (default: on)
+git config pullpal.testCommand "make check"         # override detection
+git config pullpal.testCache on|off                 # skip a commit that already passed (default: on)
+git config pullpal.longLived "release/* develop"    # branches never synced with the default branch
+git config branch.my-feature.pullpalBase develop    # what this branch is based on
 ```
 
 `pullpal.sync`:
 
-- `default` — rebase onto the remote's default branch when behind it
-- `upstream` — rebase only onto your branch's own upstream
-- `off` — still fetch, never rebase
+- `check`: compare with the base branch and block only on conflicts. Never
+  rewrites history. This is the default.
+- `rebase`: rebase onto the base branch when behind it and the rebase applies
+  cleanly.
+- `upstream`: rebase onto your branch's own upstream when behind it (like
+  `git pull --rebase`).
+- `off`: still fetch, but never compare or rebase.
+
+The **base branch** is the remote's default branch. If a branch is based on
+something else, such as a stacked PR or a branch cut from `develop`, set
+`branch.<name>.pullpalBase`.
+
+`pullpal.longLived` replaces the built-in list (`main master trunk develop
+development dev staging production prod release/* releases/* release-*
+hotfix/*`). Set it to an empty string to treat no branch as long-lived.
 
 Command-line flags beat config; repo config beats global config.
 
@@ -208,7 +285,7 @@ DO_NOT_TRACK=1               # honoured, per consoledonottrack.com
 PULLPAL_NO_ANALYTICS=1
 ```
 
-When analytics is off, nothing is sent — no request, no connection. Run
+When analytics is off, nothing is sent: no request, no connection. Run
 `pull-pal analytics status` to see the current state.
 
 ---
@@ -218,8 +295,9 @@ When analytics is off, nothing is sent — no request, no connection. Run
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Blocked: tests failed, or the gate stopped the push |
+| `1` | Blocked: conflicts with the base branch, failing tests, or the divergence guard |
 | `2` | The repository is not in a state pull-pal can work with |
+| `130` | Interrupted (Ctrl+C) while the tests ran; nothing was pushed |
 | test runner's code | Propagated when a test suite fails with its own code |
 
 ---
@@ -237,11 +315,11 @@ bun run lint
 bun run build     # binaries, tarballs, checksums, npm packages
 ```
 
-The architecture keeps decisions pure and effects at the edges: `src/core/`
+The architecture keeps decisions pure and effects at the edges. `src/core/`
 decides what to do from plain data and is unit-tested without a repository,
-while `src/git/` and `src/detect/fsview.ts` are the only modules that touch the
-operating system. Integration tests run the real CLI against real repositories
-with a local bare remote.
+while `src/git/` and `src/detect/fsview.ts` are the only modules that touch git
+and the project files. Integration tests run the real CLI against real
+repositories with a local bare remote.
 
 pull-pal gates its own pushes with pull-pal.
 

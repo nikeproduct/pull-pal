@@ -5,6 +5,7 @@
  */
 
 import type { PullPalConfig } from "../config";
+import { chooseTarget } from "../core/plan";
 import type { TestPlan } from "../core/types";
 import type { GitRunner } from "../git/exec";
 import * as queries from "../git/queries";
@@ -50,7 +51,32 @@ export function renderDoctor(input: DoctorInput): string {
   const defaultBranch = base.remotes.length ? queries.resolveDefaultBranch(git, remote) : null;
   out.push(line("default branch", defaultBranch ? `${remote}/${defaultBranch}` : "undetermined"));
 
-  out.push(line("working tree", base.dirty ? "modified (would autostash)" : "clean"));
+  const target = chooseTarget({
+    branch: base.branch,
+    sync: {
+      remote,
+      defaultBranch,
+      configuredBase: queries.readConfiguredBase(git, base.branch),
+      upstream,
+      aheadUpstream: null,
+      behindUpstream: null,
+    },
+    policy: config.syncPolicy,
+    enabled: true,
+    longLived: config.longLived,
+  });
+  out.push(
+    line(
+      "compared with",
+      target.ref ? `${target.ref} (${target.reason})` : `nothing — ${target.reason}`,
+    ),
+  );
+
+  const status = git.capture(["status", "--porcelain"]);
+  const changed = status.exitCode === 0 && status.stdout.length > 0;
+  out.push(
+    line("working tree", changed ? "uncommitted changes (set aside while tests run)" : "clean"),
+  );
   if (base.operationInProgress) {
     out.push(line("in progress", `${base.operationInProgress} — pull-pal would refuse to run`));
   }
@@ -58,8 +84,11 @@ export function renderDoctor(input: DoctorInput): string {
 
   out.push("Configuration");
   out.push(line("sync", config.syncPolicy));
+  out.push(line("onConflict", config.onConflict));
+  out.push(line("longLived", config.longLived.length ? config.longLived.join(" ") : "(none)"));
   out.push(line("tests", config.testsEnabled ? "on" : "off"));
   out.push(line("testCommand", config.testCommand ?? "(auto-detect)"));
+  out.push(line("testCache", config.testCache ? "on" : "off"));
   out.push("");
 
   out.push("Tests");

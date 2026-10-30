@@ -20,7 +20,7 @@ export function syncState(overrides: Partial<SyncState> = {}): SyncState {
   return {
     remote: "origin",
     defaultBranch: "main",
-    behindDefault: 0,
+    configuredBase: null,
     upstream: "origin/feature",
     aheadUpstream: 0,
     behindUpstream: 0,

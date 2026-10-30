@@ -13,6 +13,7 @@ const PLATFORM_PACKAGES = {
   "darwin-arm64": "@nikeproduct/pull-pal-darwin-arm64",
   "darwin-x64":   "@nikeproduct/pull-pal-darwin-x64",
   "linux-x64":    "@nikeproduct/pull-pal-linux-x64",
+  "linux-arm64":  "@nikeproduct/pull-pal-linux-arm64",
   "win32-x64":    "@nikeproduct/pull-pal-win32-x64",
 };
 

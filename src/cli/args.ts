@@ -12,7 +12,7 @@
  * from behaviour the way the v0.1 README did.
  */
 
-import type { RunOptions, SyncPolicy } from "../core/types";
+import type { ConflictMode, RunOptions, SyncPolicy } from "../core/types";
 
 export interface FlagSpec {
   name: string;
@@ -26,10 +26,11 @@ export interface FlagSpec {
 export const FLAGS: readonly FlagSpec[] = [
   {
     name: "--no-sync",
-    description: "Skip the fetch and rebase steps entirely",
+    description: "Skip the fetch and sync steps entirely",
     deprecatedAlias: "--no-rebase",
   },
   { name: "--no-tests", description: "Skip the test runner step" },
+  { name: "--retest", description: "Run the tests even if this commit already passed" },
   { name: "--dry-run", description: "Show what would happen, change nothing" },
   { name: "--help", description: "Show this help message" },
   { name: "--version", description: "Print the pull-pal version" },
@@ -63,6 +64,8 @@ export interface ParsedFlags {
   tests: boolean;
   dryRun: boolean;
   hookMode: boolean;
+  /** Ignore the record of trees that already passed. */
+  retest: boolean;
   /** Everything pull-pal did not claim, in original order. */
   gitArgs: string[];
 }
@@ -102,6 +105,7 @@ export function parseArgs(argv: string[]): ParseResult {
     tests: true,
     dryRun: false,
     hookMode: false,
+    retest: false,
     gitArgs: [],
   };
 
@@ -136,6 +140,9 @@ export function parseArgs(argv: string[]): ParseResult {
       case "--dry-run":
         flags.dryRun = true;
         continue;
+      case "--retest":
+        flags.retest = true;
+        continue;
       case "--hook-mode":
         flags.hookMode = true;
         continue;
@@ -158,7 +165,10 @@ export function parseArgs(argv: string[]): ParseResult {
 
 export interface ResolvedConfig {
   syncPolicy: SyncPolicy;
+  onConflict: ConflictMode;
   testsEnabled: boolean;
+  testCache: boolean;
+  longLived: readonly string[];
 }
 
 /** Flags beat config: an explicit --no-tests overrides `pullpal.tests = on`. */
@@ -169,6 +179,9 @@ export function toRunOptions(flags: ParsedFlags, config: ResolvedConfig): RunOpt
     dryRun: flags.dryRun,
     hookMode: flags.hookMode,
     syncPolicy: config.syncPolicy,
+    onConflict: config.onConflict,
+    longLived: config.longLived,
+    useTestCache: config.testCache && !flags.retest,
     gitArgs: flags.gitArgs,
   };
 }

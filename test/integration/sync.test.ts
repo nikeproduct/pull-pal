@@ -8,16 +8,31 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { EXIT, UserFacingError } from "../../src/core/errors";
 import { runPush } from "../../src/core/workflow";
-import { type makeRepo, withRepo } from "../helpers/fixture";
+import { createMemoryTestCache } from "../../src/test-cache";
+import { type Fixture, withRepo } from "../helpers/fixture";
 import { fakeTestPlan, makeDeps, options } from "../helpers/harness";
 
 /** Sha of a branch as it exists on the bare remote. */
-function remoteSha(repo: ReturnType<typeof makeRepo>, branch = "main"): string {
+function remoteSha(repo: Fixture, branch = "main"): string {
   return (
     repo.git(["ls-remote", repo.remoteDir, `refs/heads/${branch}`]).stdout.split(/\s+/)[0] ?? ""
   );
+}
+
+/** Check out a new feature branch off main, commit to it, and publish it. */
+function publishFeature(
+  repo: Fixture,
+  name = "feature",
+  files: Record<string, string> = { "f.txt": "feature\n" },
+) {
+  repo.git(["checkout", "-q", "-b", name]);
+  const sha = repo.commit(`${name} work`, files);
+  repo.git(["push", "-q", "-u", "origin", name]);
+  return sha;
 }
 
 describe("push pipeline", () => {
@@ -38,68 +53,6 @@ describe("push pipeline", () => {
     });
   });
 
-  test("behind the default branch: rebases, then force-pushes with a lease", async () => {
-    await withRepo(async (repo) => {
-      const teammate = repo.advanceRemote("main", "teammate work");
-      repo.commit("my work", { "mine.txt": "mine" });
-      const h = makeDeps(repo.dir);
-
-      const result = await runPush(h.deps, options());
-
-      expect(result.exitCode).toBe(EXIT.ok);
-      expect(result.rebased).toBe(true);
-      expect(result.pushed).toBe(true);
-
-      // Our commit now sits on top of the teammate's on the remote.
-      const pushed = remoteSha(repo);
-      expect(pushed).toBe(repo.sha("HEAD"));
-      expect(repo.git(["log", "--oneline"]).stdout).toContain("my work");
-      expect(repo.git(["merge-base", "--is-ancestor", teammate, "HEAD"]).exitCode).toBe(0);
-      expect(h.ui.text()).toContain("--force-with-lease");
-    });
-  });
-
-  test("dirty working tree is stashed across the rebase and restored", async () => {
-    await withRepo(async (repo) => {
-      repo.commit("tracked file", { "work.txt": "committed\n" });
-      repo.advanceRemote("main", "teammate work");
-      // Uncommitted edit to a tracked file — v0.1 died here.
-      repo.writeFile("work.txt", "uncommitted edit\n");
-
-      const h = makeDeps(repo.dir);
-      const result = await runPush(h.deps, options());
-
-      expect(result.exitCode).toBe(EXIT.ok);
-      expect(result.rebased).toBe(true);
-      // The edit survived the rebase.
-      expect(await Bun.file(`${repo.dir}/work.txt`).text()).toBe("uncommitted edit\n");
-      expect(repo.git(["status", "--porcelain"]).stdout).toContain("work.txt");
-      expect(h.ui.text()).toContain("stashed and restored");
-    });
-  });
-
-  test("rebase conflict: aborts cleanly, leaves no mid-rebase state, pushes nothing", async () => {
-    await withRepo(async (repo) => {
-      const before = repo.commit("local edit", { "README.md": "local version\n" });
-      repo.advanceRemote("main", "conflicting", { "README.md": "remote version\n" });
-      const remoteBefore = remoteSha(repo);
-
-      const h = makeDeps(repo.dir);
-      const error = await runPush(h.deps, options()).catch((e: unknown) => e);
-
-      expect(error).toBeInstanceOf(UserFacingError);
-      const err = error as UserFacingError;
-      expect(err.message).toContain("Could not rebase");
-      expect(err.hint).toContain("rolled back");
-
-      // The critical guarantee: the repo is exactly as it was.
-      expect(repo.sha("HEAD")).toBe(before);
-      expect(repo.git(["rev-parse", "--git-path", "rebase-merge"]).exitCode).toBe(0);
-      expect(repo.git(["status", "--porcelain"]).stdout).toBe("");
-      expect(remoteSha(repo)).toBe(remoteBefore);
-    });
-  });
-
   test("failing tests block the push and leave the remote untouched", async () => {
     await withRepo(async (repo) => {
       const remoteBefore = remoteSha(repo);
@@ -113,6 +66,20 @@ describe("push pipeline", () => {
       expect(result.pushed).toBe(false);
       expect(remoteSha(repo)).toBe(remoteBefore);
       expect(h.ui.text()).toContain("Tests failed");
+    });
+  });
+
+  test("an interrupted suite reports the interruption and pushes nothing", async () => {
+    await withRepo(async (repo) => {
+      const remoteBefore = remoteSha(repo);
+      repo.commit("local work", { "a.txt": "a" });
+
+      const h = makeDeps(repo.dir, { testPlan: fakeTestPlan, testExitCode: EXIT.interrupted });
+      const result = await runPush(h.deps, options());
+
+      expect(result.exitCode).toBe(EXIT.interrupted);
+      expect(h.ui.text()).toContain("Tests interrupted");
+      expect(remoteSha(repo)).toBe(remoteBefore);
     });
   });
 
@@ -143,13 +110,13 @@ describe("push pipeline", () => {
     });
   });
 
-  test("--no-sync skips the rebase even when behind", async () => {
+  test("--no-sync skips the sync even when behind", async () => {
     await withRepo(async (repo) => {
       repo.advanceRemote("main", "teammate work");
       repo.commit("my work", { "mine.txt": "mine" });
 
       const h = makeDeps(repo.dir);
-      const result = await runPush(h.deps, options({ sync: false }));
+      const result = await runPush(h.deps, options({ sync: false, syncPolicy: "rebase" }));
 
       expect(result.rebased).toBe(false);
       expect(h.ui.text()).toContain("--no-sync");
@@ -158,7 +125,7 @@ describe("push pipeline", () => {
     });
   });
 
-  test("sync policy off fetches but never rebases", async () => {
+  test("sync policy off fetches but never compares or rebases", async () => {
     await withRepo(async (repo) => {
       repo.advanceRemote("main", "teammate work");
       const h = makeDeps(repo.dir);
@@ -189,6 +156,328 @@ describe("push pipeline", () => {
   });
 });
 
+describe("sync=check (the default)", () => {
+  test("behind main but merging cleanly: pushes as-is, history untouched", async () => {
+    await withRepo(async (repo) => {
+      const mine = publishFeature(repo);
+      repo.advanceRemote("main", "teammate work");
+      const next = repo.commit("more work", { "g.txt": "g" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options());
+
+      expect(result.exitCode).toBe(EXIT.ok);
+      expect(result.rebased).toBe(false);
+      expect(result.pushed).toBe(true);
+      expect(repo.git(["merge-base", "--is-ancestor", mine, "HEAD"]).exitCode).toBe(0);
+      expect(remoteSha(repo, "feature")).toBe(next);
+      expect(h.ui.text()).toContain("behind origin/main by 1 commit — merges cleanly");
+      expect(h.ui.text()).not.toContain("--force-with-lease");
+    });
+  });
+
+  test("a branch that no longer merges is blocked before tests or push", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo, "feature", { "README.md": "feature version\n" });
+      repo.advanceRemote("main", "conflicting", { "README.md": "main version\n" });
+      const remoteBefore = remoteSha(repo, "feature");
+      repo.commit("more", { "README.md": "feature version 2\n" });
+
+      const h = makeDeps(repo.dir, { testPlan: fakeTestPlan });
+      const result = await runPush(h.deps, options());
+
+      expect(result.exitCode).toBe(EXIT.blocked);
+      expect(result.blocked).toBe("conflicts");
+      expect(h.testRuns).toBe(0);
+      expect(remoteSha(repo, "feature")).toBe(remoteBefore);
+      expect(h.ui.text()).toContain("README.md");
+      expect(h.ui.text()).toContain("git rebase origin/main");
+      // The check is in memory: nothing to clean up afterwards.
+      expect(repo.git(["status", "--porcelain"]).stdout).toBe("");
+    });
+  });
+
+  test("pullpal.onConflict=warn lets a conflicting branch through", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo, "feature", { "README.md": "feature version\n" });
+      repo.advanceRemote("main", "conflicting", { "README.md": "main version\n" });
+      const next = repo.commit("more", { "x.txt": "x" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ onConflict: "warn" }));
+
+      expect(result.pushed).toBe(true);
+      expect(remoteSha(repo, "feature")).toBe(next);
+      expect(h.ui.text()).toContain("conflict with origin/main");
+    });
+  });
+});
+
+describe("sync=rebase", () => {
+  test("behind the default branch: rebases, then force-pushes with a lease", async () => {
+    await withRepo(async (repo) => {
+      const teammate = repo.advanceRemote("main", "teammate work");
+      repo.commit("my work", { "mine.txt": "mine" });
+      const h = makeDeps(repo.dir);
+
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
+
+      expect(result.exitCode).toBe(EXIT.ok);
+      expect(result.rebased).toBe(true);
+      expect(result.pushed).toBe(true);
+
+      // Our commit now sits on top of the teammate's on the remote.
+      expect(remoteSha(repo)).toBe(repo.sha("HEAD"));
+      expect(repo.git(["log", "--oneline"]).stdout).toContain("my work");
+      expect(repo.git(["merge-base", "--is-ancestor", teammate, "HEAD"]).exitCode).toBe(0);
+      expect(h.ui.text()).toContain("--force-with-lease");
+    });
+  });
+
+  test("dirty working tree is stashed across the rebase and restored", async () => {
+    await withRepo(async (repo) => {
+      repo.commit("tracked file", { "work.txt": "committed\n" });
+      repo.advanceRemote("main", "teammate work");
+      // Uncommitted edit to a tracked file — v0.1 died here.
+      repo.writeFile("work.txt", "uncommitted edit\n");
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
+
+      expect(result.exitCode).toBe(EXIT.ok);
+      expect(result.rebased).toBe(true);
+      // The edit survived the rebase.
+      expect(readFileSync(join(repo.dir, "work.txt"), "utf8")).toBe("uncommitted edit\n");
+      expect(repo.git(["status", "--porcelain"]).stdout).toContain("work.txt");
+      expect(h.ui.text()).toContain("stashed and restored");
+    });
+  });
+
+  test("a predictable conflict is caught before any rebase starts", async () => {
+    await withRepo(async (repo) => {
+      const before = repo.commit("local edit", { "README.md": "local version\n" });
+      repo.advanceRemote("main", "conflicting", { "README.md": "remote version\n" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
+
+      expect(result.blocked).toBe("conflicts");
+      expect(result.rebased).toBe(false);
+      expect(repo.sha("HEAD")).toBe(before);
+    });
+  });
+
+  /**
+   * A rebase replays commit by commit, so it can conflict where the overall
+   * merge does not: here the branch changes a line and then changes it back.
+   * merge-tree says "clean"; the rebase still stops at the first commit — and
+   * must roll back completely.
+   */
+  test("a rebase that conflicts mid-way aborts cleanly and pushes nothing", async () => {
+    await withRepo(async (repo) => {
+      repo.commit("change", { "README.md": "local version\n" });
+      const before = repo.commit("change back", { "README.md": "# fixture\n" });
+      repo.advanceRemote("main", "conflicting", { "README.md": "remote version\n" });
+      const remoteBefore = remoteSha(repo);
+
+      const h = makeDeps(repo.dir);
+      const error = await runPush(h.deps, options({ syncPolicy: "rebase" })).catch(
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(UserFacingError);
+      const err = error as UserFacingError;
+      expect(err.message).toContain("Could not rebase");
+      expect(err.hint).toContain("rolled back");
+
+      // The critical guarantee: the repo is exactly as it was.
+      expect(repo.sha("HEAD")).toBe(before);
+      expect(existsSync(join(repo.dir, ".git", "rebase-merge"))).toBe(false);
+      expect(repo.git(["status", "--porcelain"]).stdout).toBe("");
+      expect(remoteSha(repo)).toBe(remoteBefore);
+    });
+  });
+});
+
+describe("only the checked-out branch is synced", () => {
+  /**
+   * The bug from the review: on feature-a, `pull-pal origin feature-x` rebased
+   * feature-a and pushed feature-x with --force-with-lease. The fetch had just
+   * refreshed origin/feature-x, so the lease passed and a teammate's commits on
+   * feature-x were overwritten.
+   */
+  test("pushing another branch never rebases HEAD or adds a lease", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["checkout", "-q", "-b", "feature-x"]);
+      repo.commit("x", { "x.txt": "x" });
+      repo.git(["push", "-q", "-u", "origin", "feature-x"]);
+      const teammate = repo.advanceRemote("feature-x", "teammate on feature-x");
+      repo.git(["checkout", "-q", "main"]);
+      const featureA = publishFeature(repo, "feature-a", { "a.txt": "a" });
+      repo.advanceRemote("main", "main moved");
+      repo.git(["fetch", "-q", "origin"]);
+      repo.git(["branch", "-f", "feature-x", "feature-x@{1}"]); // local feature-x is stale
+
+      const h = makeDeps(repo.dir, { testPlan: fakeTestPlan, testExitCode: 1 });
+      const result = await runPush(
+        h.deps,
+        options({ syncPolicy: "rebase", gitArgs: ["origin", "feature-x"] }),
+      );
+
+      expect(result.rebased).toBe(false);
+      expect(repo.sha("HEAD")).toBe(featureA);
+      // HEAD's tests say nothing about feature-x, so they did not run.
+      expect(h.testRuns).toBe(0);
+      expect(h.ui.text()).not.toContain("--force-with-lease");
+      // Git rejected the stale push itself; the teammate's commit survives.
+      expect(remoteSha(repo, "feature-x")).toBe(teammate);
+      expect(h.ui.text()).toContain("not the checked-out branch");
+    });
+  });
+
+  test("a long-lived branch is never rebased onto main", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["checkout", "-q", "-b", "release/1.0"]);
+      repo.commit("release fix", { "fix.txt": "fix" });
+      repo.git(["push", "-q", "-u", "origin", "release/1.0"]);
+      repo.advanceRemote("main", "main moved on");
+      const before = repo.commit("another fix", { "fix2.txt": "fix" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
+
+      expect(result.rebased).toBe(false);
+      expect(result.pushed).toBe(true);
+      expect(repo.sha("HEAD")).toBe(before);
+      expect(remoteSha(repo, "release/1.0")).toBe(before);
+      expect(h.ui.text()).toContain("long-lived");
+    });
+  });
+
+  test("branch.<name>.pullpalBase syncs a stacked branch with its parent", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo, "feature-a", { "a.txt": "a" });
+      repo.git(["checkout", "-q", "-b", "feature-b"]);
+      repo.commit("b", { "b.txt": "b" });
+      repo.git(["push", "-q", "-u", "origin", "feature-b"]);
+      repo.git(["config", "branch.feature-b.pullpalBase", "feature-a"]);
+      const parent = repo.advanceRemote("feature-a", "parent moved");
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
+
+      expect(result.rebased).toBe(true);
+      expect(repo.git(["merge-base", "--is-ancestor", parent, "HEAD"]).exitCode).toBe(0);
+      expect(h.ui.text()).toContain("origin/feature-a");
+    });
+  });
+});
+
+describe("tests run against exactly what is pushed", () => {
+  test("uncommitted and untracked changes are invisible to the tests, then restored", async () => {
+    await withRepo(async (repo) => {
+      repo.commit("tracked", { "work.txt": "committed\n" });
+      repo.writeFile("work.txt", "uncommitted\n");
+      repo.writeFile("forgot-to-add.txt", "untracked\n");
+      repo.git(["add", "work.txt"]); // a staged change, too
+
+      let seen = null as { work: string; untracked: boolean } | null;
+      const h = makeDeps(repo.dir, {
+        testPlan: fakeTestPlan,
+        duringTests: () => {
+          seen = {
+            work: readFileSync(join(repo.dir, "work.txt"), "utf8"),
+            untracked: existsSync(join(repo.dir, "forgot-to-add.txt")),
+          };
+        },
+      });
+      const result = await runPush(h.deps, options());
+
+      expect(result.pushed).toBe(true);
+      expect(seen).toEqual({ work: "committed\n", untracked: false });
+      // Everything is back, including what was staged.
+      expect(readFileSync(join(repo.dir, "work.txt"), "utf8")).toBe("uncommitted\n");
+      expect(existsSync(join(repo.dir, "forgot-to-add.txt"))).toBe(true);
+      expect(repo.git(["diff", "--cached", "--name-only"]).stdout).toBe("work.txt");
+      expect(repo.git(["stash", "list"]).stdout).toBe("");
+    });
+  });
+
+  test("changes are restored even when the tests fail", async () => {
+    await withRepo(async (repo) => {
+      repo.writeFile("wip.txt", "wip\n");
+      const h = makeDeps(repo.dir, { testPlan: fakeTestPlan, testExitCode: 1 });
+
+      const result = await runPush(h.deps, options());
+
+      expect(result.blocked).toBe("tests-failed");
+      expect(existsSync(join(repo.dir, "wip.txt"))).toBe(true);
+      expect(repo.git(["stash", "list"]).stdout).toBe("");
+    });
+  });
+
+  test("a restore that cannot apply stops the push and says where the work is", async () => {
+    await withRepo(async (repo) => {
+      const remoteBefore = remoteSha(repo);
+      repo.commit("work", { "a.txt": "a" });
+      repo.writeFile("output.txt", "my notes\n");
+
+      // The suite writes a file with the same name as the stashed one.
+      const h = makeDeps(repo.dir, {
+        testPlan: fakeTestPlan,
+        duringTests: () => repo.writeFile("output.txt", "test output\n"),
+      });
+      const error = await runPush(h.deps, options()).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(UserFacingError);
+      expect((error as UserFacingError).message).toContain("Could not restore");
+      expect((error as UserFacingError).hint).toContain("git stash list");
+      expect(remoteSha(repo)).toBe(remoteBefore);
+      // Nothing lost: the original is still in the stash.
+      expect(repo.git(["stash", "list"]).stdout).toContain("pull-pal");
+    });
+  });
+});
+
+describe("test cache", () => {
+  test("a commit that already passed is not tested again", async () => {
+    await withRepo(async (repo) => {
+      const testCache = createMemoryTestCache();
+      repo.commit("work", { "a.txt": "a" });
+
+      const first = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache });
+      await runPush(first.deps, options({ dryRun: false }));
+      const second = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache });
+      const result = await runPush(second.deps, options());
+
+      expect(first.testRuns).toBe(1);
+      expect(second.testRuns).toBe(0);
+      expect(result.testsPassed).toBe(true);
+      expect(second.ui.text()).toContain("already passed for this exact commit");
+    });
+  });
+
+  test("a new commit, --retest, or a failure means the suite runs again", async () => {
+    await withRepo(async (repo) => {
+      const testCache = createMemoryTestCache();
+      repo.commit("work", { "a.txt": "a" });
+      await runPush(makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache }).deps, options());
+
+      const retest = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache });
+      await runPush(retest.deps, options({ useTestCache: false }));
+      expect(retest.testRuns).toBe(1);
+
+      repo.commit("more", { "b.txt": "b" });
+      const failing = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache, testExitCode: 1 });
+      await runPush(failing.deps, options());
+      const again = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache, testExitCode: 1 });
+      await runPush(again.deps, options());
+      expect(failing.testRuns).toBe(1);
+      expect(again.testRuns).toBe(1);
+    });
+  });
+});
+
 describe("divergence guard", () => {
   /**
    * The dangerous shape: we are behind the default branch (so pull-pal will
@@ -196,7 +485,7 @@ describe("divergence guard", () => {
    * branch. Without the guard, that force-push silently destroys their commit —
    * and --force-with-lease does not help, because this run already fetched.
    */
-  function setUpDivergence(repo: ReturnType<typeof makeRepo>) {
+  function setUpDivergence(repo: Fixture) {
     repo.git(["checkout", "-q", "-b", "feature"]);
     repo.commit("first", { "f.txt": "1" });
     repo.git(["push", "-q", "-u", "origin", "feature"]);
@@ -211,7 +500,7 @@ describe("divergence guard", () => {
       const { teammate } = setUpDivergence(repo);
 
       const h = makeDeps(repo.dir);
-      const result = await runPush(h.deps, options());
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase" }));
 
       expect(result.exitCode).toBe(EXIT.blocked);
       expect(result.blocked).toBe("diverged-upstream");
@@ -228,7 +517,7 @@ describe("divergence guard", () => {
       setUpDivergence(repo);
 
       const h = makeDeps(repo.dir);
-      const result = await runPush(h.deps, options({ gitArgs: ["--force"] }));
+      const result = await runPush(h.deps, options({ syncPolicy: "rebase", gitArgs: ["--force"] }));
 
       expect(result.blocked).toBeNull();
       expect(result.pushed).toBe(true);
@@ -291,7 +580,7 @@ describe("dry run", () => {
       const remoteBefore = remoteSha(repo);
 
       const h = makeDeps(repo.dir, { testPlan: fakeTestPlan });
-      const result = await runPush(h.deps, options({ dryRun: true }));
+      const result = await runPush(h.deps, options({ dryRun: true, syncPolicy: "rebase" }));
 
       expect(result.exitCode).toBe(EXIT.ok);
       expect(result.rebased).toBe(false);
@@ -304,6 +593,20 @@ describe("dry run", () => {
       expect(out).toContain("Dry run");
       expect(out).toContain("rebase onto origin/main");
       expect(out).toContain("stub-runner test");
+    });
+  });
+
+  test("under the default policy the plan is a comparison, not a rebase", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo);
+      repo.advanceRemote("main", "teammate work");
+
+      const h = makeDeps(repo.dir);
+      await runPush(h.deps, options({ dryRun: true }));
+
+      expect(h.ui.text()).toContain("compare with origin/main");
+      expect(h.ui.text()).toContain("merges cleanly");
+      expect(h.ui.text()).not.toContain("--force-with-lease");
     });
   });
 

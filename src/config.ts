@@ -9,34 +9,42 @@
  * default rather than failing a push.
  */
 
-import type { GateMode } from "./core/gate";
-import type { SyncPolicy } from "./core/types";
+import { DEFAULT_LONG_LIVED } from "./core/plan";
+import type { ConflictMode, SyncPolicy } from "./core/types";
 import type { GitRunner } from "./git/exec";
 
 export interface PullPalConfig {
   syncPolicy: SyncPolicy;
+  /** What a conflict with the base branch does — in both the command and the hook. */
+  onConflict: ConflictMode;
   testsEnabled: boolean;
   testCommand: string | null;
-  /** Whether the pre-push hook blocks or merely warns when out of sync. */
-  hookGate: GateMode;
+  /** Remember passing trees and skip re-running them. */
+  testCache: boolean;
+  /** Branch patterns never compared with the default branch. */
+  longLived: readonly string[];
 }
 
 export const DEFAULT_CONFIG: PullPalConfig = {
-  syncPolicy: "default",
+  syncPolicy: "check",
+  onConflict: "block",
   testsEnabled: true,
   testCommand: null,
-  hookGate: "block",
+  testCache: true,
+  longLived: DEFAULT_LONG_LIVED,
 };
 
 export const CONFIG_KEYS = {
   sync: "pullpal.sync",
+  onConflict: "pullpal.onConflict",
   tests: "pullpal.tests",
   testCommand: "pullpal.testCommand",
-  hookGate: "pullpal.hookGate",
+  testCache: "pullpal.testCache",
+  longLived: "pullpal.longLived",
 } as const;
 
-export function parseGateMode(value: string | null): GateMode {
-  return value?.toLowerCase() === "warn" ? "warn" : DEFAULT_CONFIG.hookGate;
+export function parseConflictMode(value: string | null): ConflictMode {
+  return value?.toLowerCase() === "warn" ? "warn" : DEFAULT_CONFIG.onConflict;
 }
 
 function readKey(git: GitRunner, key: string): string | null {
@@ -44,20 +52,37 @@ function readKey(git: GitRunner, key: string): string | null {
   return r.exitCode === 0 && r.stdout.trim() !== "" ? r.stdout.trim() : null;
 }
 
+function readAll(git: GitRunner, key: string): string[] {
+  const r = git.capture(["config", "--get-all", key]);
+  return r.exitCode === 0 ? r.stdout.split(/\r?\n/) : [];
+}
+
 export function parseSyncPolicy(value: string | null): SyncPolicy {
   switch (value?.toLowerCase()) {
+    case "check":
+      return "check";
+    case "rebase":
+      return "rebase";
     case "upstream":
       return "upstream";
     case "off":
     case "none":
     case "false":
       return "off";
-    case "default":
-    case "main":
-      return "default";
     default:
       return DEFAULT_CONFIG.syncPolicy;
   }
+}
+
+/**
+ * `pullpal.longLived` may be given several times (`git config --add`), and each
+ * value may hold several patterns separated by spaces or commas. Setting it
+ * replaces the defaults rather than adding to them, so a repo can also *remove*
+ * a default — an empty value means "no long-lived branches".
+ */
+export function parseLongLived(values: string[]): readonly string[] {
+  if (values.length === 0) return DEFAULT_CONFIG.longLived;
+  return values.flatMap((v) => v.split(/[\s,]+/)).filter(Boolean);
 }
 
 export function parseBool(value: string | null, fallback: boolean): boolean {
@@ -80,9 +105,11 @@ export function parseBool(value: string | null, fallback: boolean): boolean {
 export function loadConfig(git: GitRunner): PullPalConfig {
   return {
     syncPolicy: parseSyncPolicy(readKey(git, CONFIG_KEYS.sync)),
+    onConflict: parseConflictMode(readKey(git, CONFIG_KEYS.onConflict)),
     testsEnabled: parseBool(readKey(git, CONFIG_KEYS.tests), DEFAULT_CONFIG.testsEnabled),
     testCommand: readKey(git, CONFIG_KEYS.testCommand),
-    hookGate: parseGateMode(readKey(git, CONFIG_KEYS.hookGate)),
+    testCache: parseBool(readKey(git, CONFIG_KEYS.testCache), DEFAULT_CONFIG.testCache),
+    longLived: parseLongLived(readAll(git, CONFIG_KEYS.longLived)),
   };
 }
 

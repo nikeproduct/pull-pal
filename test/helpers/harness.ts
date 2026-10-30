@@ -3,9 +3,11 @@
  * a recording reporter, and stubbed test detection/execution.
  */
 
+import { DEFAULT_LONG_LIVED } from "../../src/core/plan";
 import type { RunOptions } from "../../src/core/types";
 import type { Reporter, TestPlan, WorkflowDeps } from "../../src/core/workflow";
 import { createGitRunner } from "../../src/git/exec";
+import { type TestCache, createMemoryTestCache } from "../../src/test-cache";
 
 export interface RecordingUi {
   ui: Reporter;
@@ -38,6 +40,10 @@ export interface HarnessOptions {
   testExitCode?: number;
   /** Whether the detected command counts as present on PATH. Default true. */
   runnable?: boolean;
+  /** Called while the stubbed suite "runs" — e.g. to inspect the working tree. */
+  duringTests?: () => void;
+  /** Share a cache between runs. Default: a fresh in-memory cache. */
+  testCache?: TestCache;
 }
 
 export interface Harness {
@@ -59,8 +65,10 @@ export function makeDeps(cwd: string, opts: HarnessOptions = {}): Harness {
       isRunnable: () => opts.runnable ?? true,
       async runTests() {
         harness.testRuns += 1;
+        opts.duringTests?.();
         return opts.testExitCode ?? 0;
       },
+      testCache: opts.testCache ?? createMemoryTestCache(),
     },
   };
   return harness;
@@ -72,7 +80,10 @@ export function options(overrides: Partial<RunOptions> = {}): RunOptions {
     tests: true,
     dryRun: false,
     hookMode: false,
-    syncPolicy: "default",
+    syncPolicy: "check",
+    onConflict: "block",
+    longLived: DEFAULT_LONG_LIVED,
+    useTestCache: true,
     gitArgs: [],
     ...overrides,
   };

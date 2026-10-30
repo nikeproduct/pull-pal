@@ -3,7 +3,8 @@ name: Release
 # Manual releasing is what produced v0.1's worst distribution defects: a
 # Homebrew tap that was never created, a PyPI package that was never published,
 # and a build path that could ship a binary reporting the wrong version. Every
-# one of those steps is automated and verified here.
+# remaining channel — GitHub Releases, npm, Homebrew — is automated and verified
+# here.
 
 on:
   push:
@@ -90,7 +91,6 @@ jobs:
             dist/tarballs/*.tar.gz
             dist/SHA256SUMS
             npm-packages/
-            python/pull_pal/SHA256SUMS
 
   github-release:
     name: Publish GitHub Release
@@ -136,37 +136,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bun run scripts/publish-npm.ts
 
-  pypi:
-    name: Publish to PyPI
-    needs: [build, github-release]
-    runs-on: ubuntu-latest
-    environment: pypi
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # A manual run names an existing tag; build from it, not from the branch.
-          ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-artifacts
-
-      # Without this the wheel ships no checksums and the launcher cannot verify
-      # what it downloads.
-      - name: Confirm the checksum manifest is present
-        run: test -s python/pull_pal/SHA256SUMS
-
-      - name: Build and publish
-        run: |
-          python -m pip install --upgrade build twine
-          python -m build python/
-          python -m twine upload python/dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-
   homebrew:
     name: Update the Homebrew tap
     needs: [build, github-release]
@@ -204,44 +173,26 @@ jobs:
           gh pr create --fill --base main
 
   smoke:
-    name: Install from ${{ matrix.channel }}
+    name: Install from npm (${{ matrix.os }})
     # `build` must be a direct dependency: the needs context only exposes the
     # outputs of jobs listed here, and this job pins installs to its version.
-    needs: [build, npm, pypi]
+    needs: [build, npm]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - channel: npm
-            os: ubuntu-latest
-          - channel: pip
-            os: ubuntu-latest
-          - channel: npm
-            os: macos-latest
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      # Installing from the real registries is the only check that proves a
+      # Installing from the real registry is the only check that proves a
       # release is actually usable, rather than merely uploaded.
       - name: Wait for registry propagation
         run: sleep 60
 
       - uses: actions/setup-node@v4
-        if: matrix.channel == 'npm'
         with:
           node-version: "20"
       - name: npm install and run
-        if: matrix.channel == 'npm'
         run: |
           npm install -g pull-pal@${{ needs.build.outputs.version }}
           pull-pal --version
           pull-pal --help
-
-      - uses: actions/setup-python@v5
-        if: matrix.channel == 'pip'
-        with:
-          python-version: "3.11"
-      - name: pip install and run
-        if: matrix.channel == 'pip'
-        run: |
-          pip install "pull-pal==${{ needs.build.outputs.version }}"
-          pull-pal --version

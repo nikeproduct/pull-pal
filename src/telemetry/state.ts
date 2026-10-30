@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type InstallSource = "npm" | "pip" | "brew" | "unknown";
+export type InstallSource = "npm" | "brew" | "unknown";
 
 export interface AnalyticsState {
   anonymousId: string;
@@ -36,7 +36,7 @@ function statePath(dir: string): string {
 }
 
 /**
- * How this binary was installed. The npm and pip launchers set
+ * How this binary was installed. The npm launcher sets
  * PULLPAL_INSTALL_SOURCE before spawning us; Homebrew ships the raw binary with
  * no wrapper, so that falls back to a path heuristic.
  */
@@ -45,7 +45,7 @@ export function detectInstallSource(
   execPath = process.execPath,
 ): InstallSource {
   const fromEnv = env.PULLPAL_INSTALL_SOURCE;
-  if (fromEnv === "npm" || fromEnv === "pip" || fromEnv === "brew") return fromEnv;
+  if (fromEnv === "npm" || fromEnv === "brew") return fromEnv;
 
   const normalized = execPath.replace(/\\/g, "/").toLowerCase();
   const brewPrefixes = ["/opt/homebrew/", "/usr/local/cellar/", "/home/linuxbrew/"];

@@ -9,9 +9,19 @@
 import * as actions from "../git/actions";
 import type { GitRunner } from "../git/exec";
 import * as queries from "../git/queries";
+import type { TestCache } from "../test-cache";
 import { EXIT, UserFacingError } from "./errors";
-import { decideSync, planPush, preflight, resolveRemote, userPassedForce } from "./plan";
-import type { RunOptions, SyncDecision, TestPlan } from "./types";
+import {
+  chooseTarget,
+  decideSync,
+  planPush,
+  preflight,
+  resolveRemote,
+  scopeOfPush,
+  userPassedForce,
+} from "./plan";
+import { runTestStep } from "./test-step";
+import type { RunOptions, SyncDecision, SyncTarget, TestPlan } from "./types";
 
 /** Output port — the terminal implementation lives in cli/ui.ts. */
 export interface Reporter {
@@ -35,6 +45,8 @@ export interface WorkflowDeps {
   isRunnable(command: string): boolean;
   /** Run the suite with the user's terminal attached; resolves to its exit code. */
   runTests(plan: TestPlan): Promise<number>;
+  /** Trees that already passed, so an unchanged commit is not re-tested. */
+  testCache: TestCache;
 }
 
 export interface WorkflowOutcome {
@@ -47,7 +59,7 @@ export interface WorkflowOutcome {
   blocked: string | null;
 }
 
-function outcome(partial: Partial<WorkflowOutcome> = {}): WorkflowOutcome {
+export function outcome(partial: Partial<WorkflowOutcome> = {}): WorkflowOutcome {
   return {
     exitCode: EXIT.ok,
     rebased: false,
@@ -74,7 +86,7 @@ function assertWorkable(deps: WorkflowDeps) {
 
 function reportSync(ui: Reporter, decision: SyncDecision): void {
   if (decision.warning) ui.warn(decision.warning);
-  if (decision.action === "none") ui.ok(decision.reason);
+  if (decision.action === "none" && !decision.warning) ui.ok(decision.reason);
 }
 
 export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<WorkflowOutcome> {
@@ -82,11 +94,31 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
 
   // ── Preflight ────────────────────────────────────────────────────────────
   const base = assertWorkable(deps);
-  const upstreamRemote = queries.readUpstreamRemote(git, base.branch);
+  const branch = base.branch as string; // preflight rules out detached/unborn
+  const upstreamRemote = queries.readUpstreamRemote(git, branch);
   const remote = resolveRemote(opts.gitArgs, base.remotes, upstreamRemote);
+  const scope = scopeOfPush({
+    gitArgs: opts.gitArgs,
+    branch,
+    upstream: queries.readUpstream(git),
+    remote,
+  });
+
+  // pull-pal vouches for the checked-out branch only. Anything else goes to git
+  // untouched: syncing or testing HEAD says nothing about another branch, and a
+  // lease added on HEAD's behalf could force-push over someone else's work.
+  const syncing = opts.sync && scope.syncsHead;
+  if (!scope.syncsHead) {
+    ui.warn(`Pushing ${scope.description}, not the checked-out branch (${branch}).`);
+    ui.detail(
+      scope.testsHead
+        ? "pull-pal will test it, but will not sync it or change how it is pushed."
+        : "pull-pal can only check the branch you have checked out — sync and tests are skipped.",
+    );
+  }
 
   // ── Fetch ────────────────────────────────────────────────────────────────
-  if (opts.sync) {
+  if (syncing) {
     ui.step(`Fetching ${remote}...`);
     const fetched = actions.fetch(git, remote);
     if (!fetched.ok) {
@@ -96,34 +128,50 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
       });
     }
     ui.ok("Fetched");
-  } else {
-    ui.info("Skipping fetch and rebase (--no-sync)");
+  } else if (!opts.sync) {
+    ui.info("Skipping fetch and sync (--no-sync)");
   }
 
   // ── Sync decision ────────────────────────────────────────────────────────
-  const syncState = opts.sync
-    ? queries.readSyncState(git, remote)
+  const syncState = syncing
+    ? queries.readSyncState(git, remote, branch)
     : queries.readOfflineSyncState(git, remote);
+  const target = chooseTarget({
+    branch,
+    sync: syncState,
+    policy: opts.syncPolicy,
+    enabled: syncing,
+    disabledReason: opts.sync ? "not syncing a push of another branch" : undefined,
+    longLived: opts.longLived,
+  });
   const decision = decideSync({
     base,
     sync: syncState,
+    target,
+    comparison: target.ref ? queries.compareWith(git, target.ref) : null,
     policy: opts.syncPolicy,
-    enabled: opts.sync,
     forced: userPassedForce(opts.gitArgs),
+    onConflict: opts.onConflict,
   });
 
   if (decision.block) {
     ui.fail(decision.block.reason);
     ui.detail(decision.block.hint);
-    return outcome({ exitCode: EXIT.blocked, blocked: "diverged-upstream" });
+    if (decision.block.kind === "conflicts") {
+      ui.detail("To push anyway: pull-pal --no-sync, or git config pullpal.onConflict warn");
+    }
+    return outcome({
+      exitCode: EXIT.blocked,
+      blocked: decision.block.kind === "conflicts" ? "conflicts" : "diverged-upstream",
+    });
   }
 
   // The branch is published on its first push, so the plan must say so.
-  const setUpstream = !syncState.upstream && base.branch ? { remote, branch: base.branch } : null;
+  const setUpstream = !syncState.upstream && scope.syncsHead ? { remote, branch } : null;
 
   // ── Dry run stops here, after everything has been decided ────────────────
   if (opts.dryRun) {
-    printDryRun(deps, opts, decision, remote, setUpstream);
+    printDryRun(deps, opts, { decision, target, remote, setUpstream, testsHead: scope.testsHead });
     return outcome({ exitCode: EXIT.ok });
   }
 
@@ -144,7 +192,7 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     }
     rebased = true;
     ui.ok(`Rebased onto ${decision.onto}`);
-  } else {
+  } else if (syncing) {
     reportSync(ui, decision);
   }
 
@@ -152,32 +200,40 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   let testsPassed: boolean | null = null;
   let testRunner: string | null = null;
 
-  if (opts.tests) {
-    const plan = deps.detectTests();
-    testRunner = plan ? plan.label : null;
+  if (opts.tests && scope.testsHead) {
+    const result = await runTestStep(deps, { useCache: opts.useTestCache });
+    testRunner = "plan" in result ? result.plan.label : null;
 
-    if (!plan) {
-      ui.warn("No test runner detected — skipping tests.");
-      ui.detail('Set one explicitly: git config pullpal.testCommand "<command>"');
-    } else if (!plan.shell && !deps.isRunnable(plan.command)) {
-      // A missing tool is an environment gap, not a test failure (defect: v0.1
-      // crashed with ENOENT and blocked the push).
-      ui.warn(`Detected ${plan.label}, but "${plan.command}" is not on PATH — skipping tests.`);
-    } else {
-      ui.step(`Running ${plan.label}`);
-      const code = await deps.runTests(plan);
-      testsPassed = code === 0;
-      if (!testsPassed) {
-        ui.fail("Tests failed — push blocked.");
+    switch (result.kind) {
+      case "none":
+        ui.warn("No test runner detected — skipping tests.");
+        ui.detail('Set one explicitly: git config pullpal.testCommand "<command>"');
+        break;
+      case "missing":
+        ui.warn(
+          `Detected ${result.plan.label}, but "${result.plan.command}" is not on PATH — skipping tests.`,
+        );
+        break;
+      case "failed":
+        ui.fail(
+          result.code === EXIT.interrupted
+            ? "Tests interrupted — nothing was pushed."
+            : "Tests failed — push blocked.",
+        );
         return outcome({
-          exitCode: code === 0 ? EXIT.blocked : code,
+          exitCode: result.code,
           rebased,
           testsPassed: false,
           testRunner,
           blocked: "tests-failed",
         });
-      }
-      ui.ok("Tests passed");
+      case "passed":
+        ui.ok("Tests passed");
+        testsPassed = true;
+        break;
+      case "cached":
+        testsPassed = true;
+        break;
     }
   }
 
@@ -209,37 +265,47 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   });
 }
 
-function printDryRun(
-  deps: WorkflowDeps,
-  opts: RunOptions,
-  decision: SyncDecision,
-  remote: string,
-  setUpstream: { remote: string; branch: string } | null,
-): void {
-  const { ui } = deps;
-  ui.info("Dry run — nothing will be changed.");
-  ui.info(`  remote:  ${remote}`);
-  ui.info(
-    `  sync:    ${decision.action === "rebase" ? `rebase onto ${decision.onto}` : "none"} (${decision.reason})`,
-  );
+interface DryRunPlan {
+  decision: SyncDecision;
+  target: SyncTarget;
+  remote: string;
+  setUpstream: { remote: string; branch: string } | null;
+  testsHead: boolean;
+}
 
-  if (opts.tests) {
-    const plan = deps.detectTests();
-    if (!plan) {
-      ui.info("  tests:   none detected");
-    } else if (!deps.isRunnable(plan.command)) {
-      ui.info(`  tests:   ${plan.label} [${plan.source}] — not on PATH, would be skipped`);
-    } else {
-      ui.info(`  tests:   ${plan.label} [${plan.source}]`);
-    }
-  } else {
-    ui.info("  tests:   skipped (--no-tests)");
+function describeSync(decision: SyncDecision, target: SyncTarget): string {
+  if (decision.action === "rebase") return `rebase onto ${decision.onto} (${decision.reason})`;
+  if (!target.ref) return `none (${decision.reason})`;
+  return `compare with ${target.ref} — ${decision.reason}`;
+}
+
+function describeTests(deps: WorkflowDeps, opts: RunOptions, testsHead: boolean): string {
+  if (!opts.tests) return "skipped (--no-tests)";
+  if (!testsHead) return "skipped (not the checked-out branch)";
+  const plan = deps.detectTests();
+  if (!plan) return "none detected";
+  const label = `${plan.label} [${plan.source}]`;
+  if (!plan.shell && !deps.isRunnable(plan.command))
+    return `${label} — not on PATH, would be skipped`;
+  const tree = queries.readHeadTree(deps.git);
+  if (opts.useTestCache && tree && deps.testCache.has(tree, plan)) {
+    return `${label} — already passed for this commit, would be skipped`;
   }
+  return label;
+}
+
+function printDryRun(deps: WorkflowDeps, opts: RunOptions, plan: DryRunPlan): void {
+  const { ui } = deps;
+  if (plan.decision.warning) ui.warn(plan.decision.warning);
+  ui.info("Dry run — nothing will be changed.");
+  ui.info(`  remote:  ${plan.remote}`);
+  ui.info(`  sync:    ${describeSync(plan.decision, plan.target)}`);
+  ui.info(`  tests:   ${describeTests(deps, opts, plan.testsHead)}`);
 
   const pushPlan = planPush({
     gitArgs: opts.gitArgs,
-    didRebase: decision.action === "rebase",
-    setUpstream,
+    didRebase: plan.decision.action === "rebase",
+    setUpstream: plan.setUpstream,
   });
   ui.info(`  push:    git push ${pushPlan.args.join(" ")}`.trimEnd());
 }

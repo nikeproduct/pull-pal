@@ -64,6 +64,13 @@ const TARGETS: Target[] = [
     tarball: false,
   },
   {
+    target: "bun-linux-arm64",
+    out: "pull-pal-linux-arm64",
+    pkgDir: "linux-arm64",
+    pkgBin: POSIX_BIN,
+    tarball: false,
+  },
+  {
     target: "bun-windows-x64",
     out: "pull-pal-windows-x64.exe",
     pkgDir: "win32-x64",
@@ -165,8 +172,8 @@ for (const t of TARGETS.filter((x) => x.tarball)) {
 
 // ── Checksums ──────────────────────────────────────────────────────────────
 //
-// Consumed by the pip launcher, which verifies the binary it downloads against
-// the copy of this file embedded in the wheel.
+// Published with every GitHub release, so anyone downloading a binary directly
+// can verify it.
 console.log("\nSHA256SUMS:");
 const assets = [
   ...TARGETS.map((t) => ({ path: join(DIST, t.out), name: t.out })),
@@ -187,8 +194,6 @@ for (const asset of assets) {
 const sumsPath = join(DIST, "SHA256SUMS");
 writeFileSync(sumsPath, `${lines.join("\n")}\n`, "utf8");
 
-// The pip package ships the checksums so first-run downloads are verifiable.
-cpSync(sumsPath, join(ROOT, "python", "pull_pal", "SHA256SUMS"));
 
 rmSync(STAGING, { recursive: true, force: true });
 

@@ -93,7 +93,6 @@ describe("state", () => {
 describe("install source", () => {
   test.each([
     ["npm", "npm"],
-    ["pip", "pip"],
     ["brew", "brew"],
   ] as const)("%s from the launcher env", (value, expected) => {
     expect(detectInstallSource({ PULLPAL_INSTALL_SOURCE: value }, "/x")).toBe(expected);

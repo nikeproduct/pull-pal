@@ -35,7 +35,8 @@ export function renderHook(argv: string[]): string {
   return `#!/bin/sh
 ${VERSION_LINE}
 #
-# Validates the push: syncs against the default branch and runs the test suite.
+# Validates the push: checks the branch still merges with its base, and runs the
+# test suite against exactly the commit being pushed.
 # It never pushes anything itself — git owns the push that is already in flight.
 #
 # Uninstall with: pull-pal remove-hook

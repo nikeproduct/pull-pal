@@ -45,38 +45,6 @@ jobs:
       - name: Integration tests
         run: bun run test:integration
 
-  python:
-    name: python launcher
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install test dependencies
-        run: python -m pip install --upgrade pytest build
-      - name: Test the download and verification path
-        run: python -m pytest python/tests -q
-      - name: Build the wheel
-        run: |
-          # The launcher requires a checksum manifest; a placeholder is enough to
-          # prove packaging works outside a release.
-          printf '0000  pull-pal-linux-x64\n' > python/pull_pal/SHA256SUMS
-          python -m build python/
-      - name: Confirm the manifest is packaged
-        run: |
-          python - <<'PY'
-          import glob
-          import sys
-          import zipfile
-
-          wheel = glob.glob("python/dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          if not any(n.endswith("pull_pal/SHA256SUMS") for n in names):
-              sys.exit(f"SHA256SUMS missing from wheel: {names}")
-          print(f"ok: {wheel} ships the checksum manifest")
-          PY
-
   build:
     name: build + smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -84,7 +52,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04-arm runs the linux-arm64 binary natively.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -101,8 +70,9 @@ jobs:
       - name: Smoke test (POSIX)
         if: runner.os != 'Windows'
         run: |
-          ./dist/pull-pal-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-x64 --version
-          ./dist/pull-pal-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-x64 --help
+          BIN=./dist/pull-pal-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          "$BIN" --version
+          "$BIN" --help
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'

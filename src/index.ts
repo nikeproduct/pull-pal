@@ -21,9 +21,11 @@ import { type WorkflowDeps, runPush } from "./core/workflow";
 import { createFsView, detectTestRunner } from "./detect/index";
 import { isInternalInvocation } from "./git/actions";
 import { createGitRunner } from "./git/exec";
+import { gitPath } from "./git/queries";
 import { describeHookState, installHook, readHookState, removeHook } from "./hooks/install";
 import { FIRST_RUN_NOTICE, createTelemetry } from "./telemetry/index";
 import { defaultConfigDir, setOptOut } from "./telemetry/state";
+import { createFileTestCache, createMemoryTestCache } from "./test-cache";
 import { isRunnable, runTests } from "./testing";
 import { VERSION } from "./version";
 
@@ -165,10 +167,8 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "push": {
-      const opts = toRunOptions(command.flags, {
-        syncPolicy: config.syncPolicy,
-        testsEnabled: config.testsEnabled,
-      });
+      const opts = toRunOptions(command.flags, config);
+      const cacheFile = gitPath(git, "pullpal/passed-trees");
 
       const deps: WorkflowDeps = {
         git,
@@ -177,6 +177,7 @@ async function main(argv: string[]): Promise<number> {
         isRunnable,
         // Hook mode must never inherit stdin: that is where git's ref list lives.
         runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
+        testCache: cacheFile ? createFileTestCache(cacheFile) : createMemoryTestCache(),
       };
 
       const shared = {
@@ -190,7 +191,7 @@ async function main(argv: string[]): Promise<number> {
         // pull-pal's own push already ran every one of these checks.
         if (isInternalInvocation()) return EXIT.ok;
         const refs = readPushRefs();
-        const outcome = await runGate(deps, { ...opts, gateMode: config.hookGate, refs });
+        const outcome = await runGate(deps, { ...opts, refs });
         await telemetry.flush({
           ...shared,
           command: "gate",

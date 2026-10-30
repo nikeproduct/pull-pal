@@ -11,22 +11,29 @@
  * but unpushed. (It also forwarded the hook's own arguments — a remote *URL* —
  * to `git push` as a refspec, so it failed before it could get that far.)
  *
- * So the hook only ever answers yes or no. When a rebase is needed it blocks and
- * tells the user to run `pull-pal`, which does the work correctly in a process
- * that owns its own push.
- *
- * It also blocks for exactly two reasons — out of sync, or failing tests. Every
- * other surprise (odd repo state, missing tools, an undeterminable default
- * branch) lets the push through with a warning. A gate that fails open on the
- * unexpected stays useful; one that fails closed gets uninstalled.
+ * So the hook only ever answers yes or no, and it blocks for exactly two
+ * reasons: the branch no longer merges cleanly with its base, or the tests
+ * fail. Merely being behind is not one of them — on an active repository that is
+ * nearly every push, and a gate that fires on nearly every push gets
+ * uninstalled. Every other surprise (odd repo state, missing tools, an
+ * undeterminable default branch, a push of something other than the checked-out
+ * branch) lets the push through with a warning, for the same reason.
  */
 
 import * as actions from "../git/actions";
 import * as queries from "../git/queries";
 import { EXIT } from "./errors";
-import { decideSync, preflight, resolveRemote, userPassedForce } from "./plan";
+import {
+  type PushedRef,
+  chooseTarget,
+  decideSync,
+  preflight,
+  resolveRemote,
+  scopeOfRefs,
+} from "./plan";
+import { runTestStep } from "./test-step";
 import type { RunOptions } from "./types";
-import type { WorkflowDeps, WorkflowOutcome } from "./workflow";
+import { type WorkflowDeps, type WorkflowOutcome, outcome } from "./workflow";
 
 /** One line of the ref list git feeds the hook on stdin. */
 export interface PushRef {
@@ -58,26 +65,12 @@ export function allDeletions(refs: PushRef[]): boolean {
   return refs.length > 0 && refs.every(isDeletion);
 }
 
-export type GateMode = "block" | "warn";
-
 export interface GateOptions extends RunOptions {
-  /** What to do when the branch is out of sync. */
-  gateMode: GateMode;
   /** Ref lines from git; empty when invoked outside a real hook. */
   refs: PushRef[];
 }
 
-function outcome(partial: Partial<WorkflowOutcome> = {}): WorkflowOutcome {
-  return {
-    exitCode: EXIT.ok,
-    rebased: false,
-    pushed: false,
-    testsPassed: null,
-    testRunner: null,
-    blocked: null,
-    ...partial,
-  };
-}
+const BYPASS = "To push anyway, bypass the hook: git push --no-verify";
 
 export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<WorkflowOutcome> {
   const { git, ui } = deps;
@@ -92,37 +85,74 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
   if (failure) {
     // Fail open: git's push is legitimate even if pull-pal cannot reason about it.
     ui.warn(`pull-pal skipped its checks: ${failure.reason}`);
-    return outcome({ blocked: null });
+    return outcome();
+  }
+  const branch = base.branch as string;
+
+  // ── What is git pushing? ─────────────────────────────────────────────────
+  // Run by hand (no ref list), the gate checks the current branch.
+  const head = queries.peelToCommit(git, "HEAD") ?? "";
+  const pushed: PushedRef[] = opts.refs
+    .filter((r) => !isDeletion(r))
+    .map((r) => ({
+      localRef: r.localRef,
+      remoteRef: r.remoteRef,
+      commit: queries.peelToCommit(git, r.localSha),
+    }));
+  const scope =
+    pushed.length > 0
+      ? scopeOfRefs(pushed, branch, head)
+      : { testsHead: true, syncsHead: true, description: branch };
+
+  if (!scope.testsHead) {
+    ui.warn(
+      `pull-pal checks only the checked-out branch (${branch}); this push is ${scope.description} — skipping its checks.`,
+    );
+    return outcome();
   }
 
   // ── Sync check ───────────────────────────────────────────────────────────
-  if (opts.sync) {
+  if (opts.sync && scope.syncsHead) {
     // Git hands the hook the remote's name as its first argument, so a push to a
     // second remote is checked against that remote, not the branch's upstream.
-    const upstreamRemote = queries.readUpstreamRemote(git, base.branch);
+    const upstreamRemote = queries.readUpstreamRemote(git, branch);
     const remote = resolveRemote(opts.gitArgs, base.remotes, upstreamRemote);
 
     const fetched = actions.fetch(git, remote);
     if (!fetched.ok) {
       ui.warn(`pull-pal could not fetch ${remote} — skipping the sync check.`);
     } else {
-      const decision = decideSync({
-        base,
-        sync: queries.readSyncState(git, remote),
+      const sync = queries.readSyncState(git, remote, branch);
+      const target = chooseTarget({
+        branch,
+        sync,
         policy: opts.syncPolicy,
         enabled: true,
-        forced: userPassedForce(opts.gitArgs),
+        longLived: opts.longLived,
+      });
+      const decision = decideSync({
+        base,
+        sync,
+        target,
+        comparison: target.ref ? queries.compareWith(git, target.ref) : null,
+        policy: opts.syncPolicy,
+        // The divergence guard protects pull-pal's own force-push. The hook
+        // never pushes, so it never applies here.
+        forced: true,
+        onConflict: opts.onConflict,
       });
 
+      if (decision.block?.kind === "conflicts") {
+        ui.fail(`Push blocked: ${decision.block.reason}`);
+        ui.detail(decision.block.hint);
+        ui.detail(BYPASS);
+        return outcome({ exitCode: EXIT.blocked, blocked: "conflicts" });
+      }
+      if (decision.warning) ui.warn(decision.warning);
       if (decision.action === "rebase") {
-        if (opts.gateMode === "warn") {
-          ui.warn(`Your branch is ${decision.reason}. Run pull-pal to rebase before pushing.`);
-        } else {
-          ui.fail(`Push blocked: your branch is ${decision.reason}.`);
-          ui.detail("Run pull-pal — it will rebase and push for you.");
-          ui.detail("To push anyway, bypass the hook: git push --no-verify");
-          return outcome({ exitCode: EXIT.blocked, blocked: "out-of-sync" });
-        }
+        // pullpal.sync=rebase: the hook cannot rebase (see above), so it says
+        // how to get the rebase, and lets this push through.
+        ui.warn(`Your branch is ${decision.reason}. Run pull-pal to rebase and push.`);
       }
     }
   }
@@ -130,27 +160,32 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
   // ── Tests ────────────────────────────────────────────────────────────────
   if (!opts.tests) return outcome();
 
-  const plan = deps.detectTests();
-  if (!plan) return outcome();
-
-  if (!plan.shell && !deps.isRunnable(plan.command)) {
-    ui.warn(`pull-pal detected ${plan.label}, but "${plan.command}" is not on PATH — skipping.`);
-    return outcome({ testRunner: plan.label });
+  const result = await runTestStep(deps, { useCache: opts.useTestCache });
+  switch (result.kind) {
+    case "none":
+      return outcome();
+    case "missing":
+      ui.warn(
+        `pull-pal detected ${result.plan.label}, but "${result.plan.command}" is not on PATH — skipping.`,
+      );
+      return outcome({ testRunner: result.plan.label });
+    case "failed":
+      ui.fail(
+        result.code === EXIT.interrupted
+          ? "Tests interrupted — push cancelled."
+          : "Tests failed — push blocked.",
+      );
+      ui.detail(BYPASS);
+      return outcome({
+        exitCode: result.code,
+        testsPassed: false,
+        testRunner: result.plan.label,
+        blocked: "tests-failed",
+      });
+    case "passed":
+      ui.ok("Tests passed");
+      return outcome({ testsPassed: true, testRunner: result.plan.label });
+    case "cached":
+      return outcome({ testsPassed: true, testRunner: result.plan.label });
   }
-
-  ui.step(`Running ${plan.label}`);
-  const code = await deps.runTests(plan);
-  if (code !== 0) {
-    ui.fail("Tests failed — push blocked.");
-    ui.detail("To push anyway, bypass the hook: git push --no-verify");
-    return outcome({
-      exitCode: code,
-      testsPassed: false,
-      testRunner: plan.label,
-      blocked: "tests-failed",
-    });
-  }
-
-  ui.ok("Tests passed");
-  return outcome({ testsPassed: true, testRunner: plan.label });
 }

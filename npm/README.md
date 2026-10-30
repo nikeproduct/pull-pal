@@ -1,7 +1,7 @@
 # pull-pal
 
-A `git push` wrapper that keeps your branch in sync and gates the push on your
-test suite.
+A `git push` that first checks your branch still merges cleanly with `main`, and
+that your tests pass on exactly the commit you are pushing.
 
 ```sh
 npm install -g pull-pal

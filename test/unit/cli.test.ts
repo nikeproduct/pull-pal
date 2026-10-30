@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { FLAGS, type ParsedFlags, parseArgs, toRunOptions } from "../../src/cli/args";
 import { renderHelp } from "../../src/cli/help";
+import { DEFAULT_CONFIG } from "../../src/config";
 
 /** Parse and assert we got a push command, returning its flags. */
 function pushFlags(argv: string[]): ParsedFlags {
@@ -41,6 +42,7 @@ describe("pull-pal's own flags", () => {
       tests: true,
       dryRun: false,
       hookMode: false,
+      retest: false,
       gitArgs: [],
     });
   });
@@ -60,6 +62,7 @@ describe("pull-pal's own flags", () => {
     ["--no-tests", "tests", false],
     ["--dry-run", "dryRun", true],
     ["--hook-mode", "hookMode", true],
+    ["--retest", "retest", true],
   ] as const)("%s sets %s", (flag, key, value) => {
     expect(pushFlags([flag])[key]).toBe(value);
   });
@@ -121,26 +124,31 @@ describe("toRunOptions", () => {
     tests: true,
     dryRun: false,
     hookMode: false,
+    retest: false,
     gitArgs: [],
     ...over,
   });
 
-  test("config supplies the sync policy", () => {
-    const opts = toRunOptions(flags(), { syncPolicy: "upstream", testsEnabled: true });
+  const config = { ...DEFAULT_CONFIG };
+
+  test("config supplies the sync policy and conflict mode", () => {
+    const opts = toRunOptions(flags(), { ...config, syncPolicy: "upstream", onConflict: "warn" });
     expect(opts.syncPolicy).toBe("upstream");
+    expect(opts.onConflict).toBe("warn");
   });
 
   test("--no-tests overrides config that enables tests", () => {
-    const opts = toRunOptions(flags({ tests: false }), {
-      syncPolicy: "default",
-      testsEnabled: true,
-    });
-    expect(opts.tests).toBe(false);
+    expect(toRunOptions(flags({ tests: false }), config).tests).toBe(false);
   });
 
   test("config can disable tests without a flag", () => {
-    const opts = toRunOptions(flags(), { syncPolicy: "default", testsEnabled: false });
-    expect(opts.tests).toBe(false);
+    expect(toRunOptions(flags(), { ...config, testsEnabled: false }).tests).toBe(false);
+  });
+
+  test("the test cache is on by default; --retest or config turns it off", () => {
+    expect(toRunOptions(flags(), config).useTestCache).toBe(true);
+    expect(toRunOptions(flags({ retest: true }), config).useTestCache).toBe(false);
+    expect(toRunOptions(flags(), { ...config, testCache: false }).useTestCache).toBe(false);
   });
 });
 
@@ -169,5 +177,9 @@ describe("help text", () => {
     expect(help).toContain("pullpal.sync");
     expect(help).toContain("pullpal.tests");
     expect(help).toContain("pullpal.testCommand");
+    expect(help).toContain("pullpal.onConflict");
+    expect(help).toContain("pullpal.testCache");
+    expect(help).toContain("pullpal.longLived");
+    expect(help).toContain("pullpalBase");
   });
 });

@@ -5,7 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import type { BaseState, OperationInProgress, SyncState } from "../core/types";
+import type { BaseState, Comparison, OperationInProgress, SyncState } from "../core/types";
 import type { GitRunner } from "./exec";
 
 function ok(git: GitRunner, args: string[]): boolean {
@@ -146,23 +146,22 @@ function aheadBehind(git: GitRunner, upstream: string): [number | null, number |
   return [Number.isFinite(ahead) ? ahead : null, Number.isFinite(behind) ? behind : null];
 }
 
-export function readSyncState(git: GitRunner, remote: string): SyncState {
+/** The base branch a branch declares for itself (`branch.<name>.pullpalBase`). */
+export function readConfiguredBase(git: GitRunner, branch: string | null): string | null {
+  if (!branch) return null;
+  const value = out(git, ["config", "--get", `branch.${branch}.pullpalBase`]);
+  if (!value) return null;
+  return value.replace(/^refs\/heads\//, "");
+}
+
+export function readSyncState(git: GitRunner, remote: string, branch: string | null): SyncState {
   const upstream = readUpstream(git);
-  const defaultBranch = resolveDefaultBranch(git, remote);
-
-  let behindDefault: number | null = null;
-  if (defaultBranch) {
-    const ref = `${remote}/${defaultBranch}`;
-    // Only meaningful if we actually have that remote-tracking ref locally.
-    behindDefault = revParse(git, ref) ? countRevs(git, `HEAD..${ref}`) : null;
-  }
-
   const [aheadUpstream, behindUpstream] = upstream ? aheadBehind(git, upstream) : [null, null];
 
   return {
     remote,
-    defaultBranch,
-    behindDefault,
+    defaultBranch: resolveDefaultBranch(git, remote),
+    configuredBase: readConfiguredBase(git, branch),
     upstream,
     aheadUpstream,
     behindUpstream,
@@ -180,9 +179,52 @@ export function readOfflineSyncState(git: GitRunner, remote: string): SyncState 
   return {
     remote,
     defaultBranch: null,
-    behindDefault: null,
+    configuredBase: null,
     upstream: readUpstream(git),
     aheadUpstream: null,
     behindUpstream: null,
   };
+}
+
+/**
+ * Paths that would conflict if HEAD were merged with `target`, computed entirely
+ * in memory by `git merge-tree --write-tree` — no checkout, no index, nothing
+ * for the user to clean up. Returns [] for a clean merge and null when the check
+ * cannot run: git older than 2.38, unrelated histories, or an unknown ref.
+ */
+export function mergeConflicts(git: GitRunner, target: string): string[] | null {
+  const r = git.capture([
+    "merge-tree",
+    "--write-tree",
+    "--name-only",
+    "--no-messages",
+    "HEAD",
+    target,
+  ]);
+  const [tree = "", ...paths] = r.stdout.split(/\r?\n/);
+  // Exit 1 also covers "not something we can merge"; only a tree id on the first
+  // line means git actually performed the merge.
+  if (!/^[0-9a-f]{40,64}$/.test(tree.trim())) return null;
+  if (r.exitCode === 0) return [];
+  if (r.exitCode !== 1) return null;
+  return [...new Set(paths.map((p) => p.trim()).filter(Boolean))];
+}
+
+/** Measure HEAD against the sync target: how far behind, and whether it merges. */
+export function compareWith(git: GitRunner, target: string): Comparison {
+  if (!revParse(git, target)) return { behind: null, conflicts: null };
+  const behind = countRevs(git, `HEAD..${target}`);
+  if (behind === null) return { behind: null, conflicts: null };
+  if (behind === 0) return { behind, conflicts: [] };
+  return { behind, conflicts: mergeConflicts(git, target) };
+}
+
+/** Tree id of HEAD — the identity of exactly what the tests run against. */
+export function readHeadTree(git: GitRunner): string | null {
+  return out(git, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]);
+}
+
+/** Resolve any object to the commit it points at (annotated tags included). */
+export function peelToCommit(git: GitRunner, sha: string): string | null {
+  return out(git, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
 }
