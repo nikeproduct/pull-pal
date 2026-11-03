@@ -1,339 +1,243 @@
 #!/usr/bin/env bun
+/**
+ * Entry point: parse, wire the adapters, run, and translate anything that
+ * escapes into an exit code.
+ *
+ * There is exactly one error boundary, at the bottom of this file. A
+ * `UserFacingError` is a condition we anticipated, so it prints as a message;
+ * anything else is a bug in pull-pal and says so.
+ */
 
-import * as git from "./git";
-import { detectTestRunner } from "./detect";
-import { runTests } from "./runner";
-import {
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-  readFileSync,
-  unlinkSync,
-  chmodSync,
-} from "fs";
-import { join, resolve } from "path";
+import { readFileSync } from "node:fs";
+import { isatty } from "node:tty";
+import { parseArgs, toRunOptions } from "./cli/args";
+import { renderDoctor } from "./cli/doctor";
+import { renderHelp } from "./cli/help";
+import { createUi } from "./cli/ui";
+import { loadConfig } from "./config";
+import { EXIT, isUserFacing } from "./core/errors";
+import { type PushRef, parsePushRefs, runGate } from "./core/gate";
+import { type WorkflowDeps, runPush } from "./core/workflow";
+import { createFsView, detectTestRunner } from "./detect/index";
+import { isInternalInvocation } from "./git/actions";
+import { createGitRunner } from "./git/exec";
+import { gitPath, readGitConfig } from "./git/queries";
+import { describeHookState, installHook, readHookState, removeHook } from "./hooks/install";
+import { FIRST_RUN_NOTICE, createTelemetry } from "./telemetry/index";
+import { defaultConfigDir, setOptOut, statePath } from "./telemetry/state";
+import { createFileTestCache, createMemoryTestCache } from "./test-cache";
+import { isRunnable, runTests } from "./testing";
 import { VERSION } from "./version";
-import {
-  initAnalytics,
-  maybePrintFirstRunNotice,
-  flushAndExit,
-  type CommandProps,
-} from "./analytics";
-import { setOptOut, loadOrInitConfig, analyticsEnabled } from "./config";
 
-const RESET  = "\x1b[0m";
-const BOLD   = "\x1b[1m";
-const GREEN  = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const RED    = "\x1b[31m";
-const CYAN   = "\x1b[36m";
-
-function step(msg: string): void {
-  console.log(`\n${BOLD}${CYAN}→ ${msg}${RESET}`);
+/**
+ * Detection and test execution should see the project root, not whatever
+ * subdirectory the user happens to be standing in.
+ */
+function repoRoot(cwd: string): string {
+  const r = createGitRunner(cwd).capture(["rev-parse", "--show-toplevel"]);
+  return r.exitCode === 0 && r.stdout ? r.stdout : cwd;
 }
 
-function ok(msg: string): void {
-  console.log(`${GREEN}✓ ${msg}${RESET}`);
-}
-
-function warn(msg: string): void {
-  console.log(`${YELLOW}⚠ ${msg}${RESET}`);
-}
-
-function fail(msg: string): void {
-  console.error(`${RED}✗ ${msg}${RESET}`);
-}
-
-function printHelp(): void {
-  console.log(`
-pull-pal — git push with automatic fetch, rebase, and test-gating
-
-Usage:
-  pull-pal [options] [git push args...]
-  pull-pal setup          Install a pre-push git hook in this repo
-  pull-pal remove-hook    Uninstall the pre-push git hook
-  pull-pal analytics <on|off|status>
-                          Manage anonymous usage analytics
-
-Options:
-  --no-rebase   Skip the rebase-against-default-branch step
-  --no-tests    Skip the test runner step
-  --help        Show this help message
-  --version     Print the pull-pal version
-
-Anonymous, non-identifying analytics are on by default to help improve the tool.
-Opt out with "pull-pal analytics off", or set DO_NOT_TRACK=1.
-
-Any other flags are passed directly to git push.
-When a rebase occurs, --force-with-lease is added automatically.
-
-Hook mode (used internally by the pre-push hook):
-  --hook-mode   Run checks only; let git handle the final push
-
-Examples:
-  pull-pal
-  pull-pal origin my-branch
-  pull-pal --no-tests origin main
-  pull-pal --force-with-lease=origin/HEAD   (override lease ref)
-  pull-pal setup                            (run once per repo)
-`);
-}
-
-function findGitDir(): string | null {
-  let dir = process.cwd();
-  while (true) {
-    const candidate = join(dir, ".git");
-    if (existsSync(candidate)) return candidate;
-    const parent = resolve(dir, "..");
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
-function setupHook(): number {
-  const gitDir = findGitDir();
-  if (!gitDir) {
-    fail("Not inside a git repository.");
-    return 1;
-  }
-
-  const hooksDir = join(gitDir, "hooks");
-  if (!existsSync(hooksDir)) {
-    mkdirSync(hooksDir, { recursive: true });
-  }
-
-  const hookPath = join(hooksDir, "pre-push");
-
-  if (existsSync(hookPath)) {
-    const existing = readFileSync(hookPath, "utf8");
-    if (!existing.includes("pull-pal --hook-mode")) {
-      fail(
-        `A pre-push hook already exists at ${hookPath} and was not created by pull-pal.\n` +
-        `  Add the following line to it manually:\n\n    pull-pal --hook-mode "$@"\n`
-      );
-      return 1;
-    }
-    warn("pre-push hook is already installed — nothing changed.");
-    return 0;
-  }
-
-  const hookContent = `#!/bin/sh\npull-pal --hook-mode "$@"\n`;
-  writeFileSync(hookPath, hookContent, { encoding: "utf8" });
-
-  if (process.platform !== "win32") {
-    chmodSync(hookPath, 0o755);
-  }
-
-  ok(`pre-push hook installed at ${hookPath}`);
-  console.log(`\nNow every ${BOLD}git push${RESET} in this repo will automatically:`);
-  console.log(`  1. Fetch the remote`);
-  console.log(`  2. Rebase against the default branch if you're behind`);
-  console.log(`  3. Run your test suite (auto-detected)`);
-  console.log(`  4. Block the push if tests fail\n`);
-  console.log(`To uninstall: ${BOLD}pull-pal remove-hook${RESET}\n`);
-  return 0;
-}
-
-function removeHook(): number {
-  const gitDir = findGitDir();
-  if (!gitDir) {
-    fail("Not inside a git repository.");
-    return 1;
-  }
-
-  const hookPath = join(gitDir, "hooks", "pre-push");
-
-  if (!existsSync(hookPath)) {
-    warn("No pre-push hook found — nothing to remove.");
-    return 0;
-  }
-
-  const content = readFileSync(hookPath, "utf8");
-  if (!content.includes("pull-pal --hook-mode")) {
-    fail(
-      `The pre-push hook at ${hookPath} was not installed by pull-pal.\n` +
-      `  Remove it manually if you no longer need it.`
-    );
-    return 1;
-  }
-
-  unlinkSync(hookPath);
-  ok("pre-push hook removed.");
-  return 0;
-}
-
-const rawArgs = process.argv.slice(2);
-
-const noRebase = rawArgs.includes("--no-rebase");
-const noTests  = rawArgs.includes("--no-tests");
-const hookMode = rawArgs.includes("--hook-mode");
-
-// Strip our own flags; pass everything else through to git push
-const gitArgs = rawArgs.filter(
-  (a) => a !== "--no-rebase" && a !== "--no-tests" && a !== "--hook-mode"
-);
-
-function printAnalyticsStatus(): void {
-  const { config } = loadOrInitConfig();
-  const enabled = analyticsEnabled(config);
-  console.log(`Analytics: ${enabled ? "enabled" : "disabled"}`);
-  if (config) {
-    console.log(`  Device ID:      ${config.anonymousId}`);
-    console.log(`  Install source: ${config.installSource}`);
-  }
-  if (config && !config.optOut && !enabled) {
-    console.log(`  (suppressed by DO_NOT_TRACK / PULLPAL_NO_ANALYTICS)`);
-  }
-}
-
-// Subcommand / flag dispatch. Runs after analytics has been initialised so the
-// terminal commands can flush their one event before exiting.
-async function dispatch(): Promise<void> {
-  if (rawArgs.includes("--version") || rawArgs.includes("-v")) {
-    console.log(VERSION);
-    process.exit(0);
-  }
-
-  if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
-    printHelp();
-    await flushAndExit(0, { command: "help" });
-  }
-
-  if (rawArgs[0] === "analytics") {
-    const mode = rawArgs[1];
-    if (mode === "off") {
-      setOptOut(true);
-      ok("Analytics disabled. No usage data will be sent.");
-    } else if (mode === "on") {
-      setOptOut(false);
-      ok("Analytics enabled. Thank you for helping improve pull-pal.");
-    } else {
-      printAnalyticsStatus();
-    }
-    process.exit(0);
-  }
-
-  if (rawArgs[0] === "setup") {
-    await flushAndExit(setupHook(), { command: "setup" });
-  }
-
-  if (rawArgs[0] === "remove-hook") {
-    await flushAndExit(removeHook(), { command: "remove-hook" });
-  }
-
-  await main();
-}
-
-async function main(): Promise<void> {
-  const props: CommandProps = {
-    command: "push",
-    hook_mode: hookMode,
-    no_rebase: noRebase,
-    no_tests: noTests,
-  };
-
-  // ── Step 1: Fetch ────────────────────────────────────────────────────────
-  step("Fetching remote...");
+/**
+ * Git feeds the pre-push hook its ref list on stdin. We must consume it — both
+ * to know whether this push is only deleting branches, and so that a test runner
+ * later in the pipeline cannot swallow the protocol (it is given no stdin at all
+ * in hook mode, but draining first is what makes that safe).
+ *
+ * The read is blocking on purpose. Awaiting `Bun.stdin.text()` here let the
+ * event loop drain on Windows before the pipe delivered anything, and Bun then
+ * exited 0 with the gate never run — a hook that silently failed open. A
+ * synchronous read has no event loop to lose, and git closes the pipe as soon
+ * as the ref list is written, so it returns promptly.
+ *
+ * Guarded on isatty so that running `pull-pal --hook-mode` by hand never hangs
+ * waiting for input that will not come.
+ */
+function readPushRefs(): PushRef[] {
+  if (isatty(0)) return [];
   try {
-    git.fetch();
-    ok("Fetched");
-  } catch (e: unknown) {
-    fail((e as Error).message);
-    await flushAndExit(1, { ...props, exit_code: 1, push_succeeded: false });
+    return parsePushRefs(readFileSync(0, "utf8"));
+  } catch {
+    return [];
   }
-
-  // ── Step 2: Resolve default branch ───────────────────────────────────────
-  const defaultBranch = git.getDefaultBranch();
-
-  // ── Step 3: Check / rebase against default branch ────────────────────────
-  let didRebase = false;
-
-  if (!noRebase) {
-    step(`Checking against origin/${defaultBranch}...`);
-    const behind = git.isBehind(defaultBranch);
-
-    if (behind) {
-      step(`Behind origin/${defaultBranch} — rebasing...`);
-      try {
-        git.rebase(defaultBranch);
-        ok(`Rebased onto origin/${defaultBranch}`);
-        didRebase = true;
-      } catch (e: unknown) {
-        fail((e as Error).message);
-        fail("Resolve conflicts then run: git rebase --continue");
-        await flushAndExit(1, { ...props, rebased: false, exit_code: 1, push_succeeded: false });
-      }
-    } else {
-      ok(`Up to date with origin/${defaultBranch}`);
-    }
-  }
-  props.rebased = didRebase;
-
-  // ── Step 4: Detect and run tests ─────────────────────────────────────────
-  if (!noTests) {
-    step("Detecting test runner...");
-    const runner = detectTestRunner();
-    props.test_runner = runner ? runner.label : null;
-
-    if (!runner) {
-      warn("No test runner detected — skipping tests.");
-      warn("Use --no-tests to suppress this warning.");
-    } else {
-      step(`Running: ${runner.label}`);
-      const { exitCode } = await runTests(runner.command, runner.args);
-      if (exitCode !== 0) {
-        fail("Tests failed — push blocked.");
-        props.tests_passed = false;
-        await flushAndExit(exitCode, { ...props, exit_code: exitCode, push_succeeded: false });
-      }
-      ok("Tests passed");
-      props.tests_passed = true;
-    }
-  }
-
-  // ── Step 5: Push ─────────────────────────────────────────────────────────
-  // In hook mode without a rebase, git itself handles the push — just exit 0.
-  if (hookMode && !didRebase) {
-    await flushAndExit(0, props);
-  }
-
-  // After a rebase, history has been rewritten — force-with-lease is required.
-  // Skip adding it if the user already supplied any force flag themselves.
-  const userPassedForce = gitArgs.some(
-    (a) => a === "--force" || a === "-f" || a.startsWith("--force-with-lease")
-  );
-  const pushArgs =
-    didRebase && !userPassedForce
-      ? ["--force-with-lease", ...gitArgs]
-      : gitArgs;
-
-  if (didRebase && !userPassedForce) {
-    warn("Rebase rewrote history — pushing with --force-with-lease");
-  }
-
-  step("Pushing...");
-  const exitCode = git.push(pushArgs);
-
-  if (exitCode === 0) {
-    // In hook mode after a rebase we pushed directly; git's own push will
-    // follow but will simply report "Everything up to date".
-    ok(hookMode ? "Rebased and pushed. Git will confirm momentarily.\n" : "Pushed successfully!\n");
-  } else {
-    fail("Push failed.");
-  }
-
-  props.push_succeeded = exitCode === 0;
-  props.exit_code = exitCode;
-  await flushAndExit(exitCode, props);
 }
 
-async function entry(): Promise<void> {
-  const { isFirstRun } = initAnalytics();
-  maybePrintFirstRunNotice(isFirstRun);
-  await dispatch();
+async function main(argv: string[]): Promise<number> {
+  const { command, warnings } = parseArgs(argv);
+  const ui = createUi();
+  for (const warning of warnings) ui.warn(warning);
+
+  // --version must stay instant and silent: it is what scripts and installers
+  // call, and it should never touch disk, network, or print a notice.
+  if (command.kind === "version") {
+    process.stdout.write(`${VERSION}\n`);
+    return EXIT.ok;
+  }
+
+  const telemetry = createTelemetry();
+  if (telemetry.isFirstRun && telemetry.enabled) {
+    process.stderr.write(`${FIRST_RUN_NOTICE}\n`);
+  }
+
+  if (command.kind === "help") {
+    process.stdout.write(renderHelp(VERSION));
+    await telemetry.flush({ command: "help" });
+    return EXIT.ok;
+  }
+
+  if (command.kind === "analytics") {
+    const dir = defaultConfigDir();
+    if (command.mode === "on" || command.mode === "off") {
+      const updated = setOptOut(dir, command.mode === "off");
+      if (!updated) {
+        ui.fail("Could not save the analytics preference — nothing was changed.");
+        ui.detail(
+          `Check that ${statePath(dir)} is writable by you (not owned by root after a sudo run).`,
+        );
+        if (command.mode === "off") ui.detail("Or opt out without the file: export DO_NOT_TRACK=1");
+        return EXIT.preflight;
+      }
+      ui.ok(
+        command.mode === "off"
+          ? "Analytics disabled. No usage data will be sent."
+          : "Analytics enabled. Thank you for helping improve pull-pal.",
+      );
+      return EXIT.ok;
+    }
+
+    const state = telemetry.state;
+    process.stdout.write(`Analytics: ${telemetry.enabled ? "enabled" : "disabled"}\n`);
+    if (state) {
+      process.stdout.write(`  Device ID:      ${state.anonymousId}\n`);
+      process.stdout.write(`  Install source: ${state.installSource}\n`);
+      if (!state.optOut && !telemetry.enabled) {
+        process.stdout.write("  (suppressed by DO_NOT_TRACK / PULLPAL_NO_ANALYTICS)\n");
+      }
+    }
+    return EXIT.ok;
+  }
+
+  const cwd = process.cwd();
+  const root = repoRoot(cwd);
+  const git = createGitRunner(root);
+  const config = loadConfig(readGitConfig(git));
+  const runnable = (command: string) => isRunnable(command, root);
+  const detect = () =>
+    detectTestRunner(
+      { fs: createFsView(root), platform: process.platform },
+      { override: config.testCommand },
+    );
+
+  switch (command.kind) {
+    case "doctor": {
+      process.stdout.write(
+        `${renderDoctor({
+          version: VERSION,
+          git,
+          config,
+          detect,
+          isRunnable: runnable,
+          hookStatus: describeHookState(readHookState(git)),
+        })}\n`,
+      );
+      await telemetry.flush({ command: "doctor" });
+      return EXIT.ok;
+    }
+
+    case "setup": {
+      const result = installHook(git);
+      if (!result.ok) {
+        ui.fail(result.message);
+        if (result.hint) for (const l of result.hint.split("\n")) ui.detail(l);
+        await telemetry.flush({ command: "setup", exit_code: EXIT.preflight });
+        return EXIT.preflight;
+      }
+      ui.ok(result.message);
+      ui.detail("Every git push in this repo will now be checked before it leaves.");
+      ui.detail("A push that no longer merges with its base, or fails tests, is blocked.");
+      await telemetry.flush({ command: "setup", exit_code: EXIT.ok });
+      return EXIT.ok;
+    }
+
+    case "remove-hook": {
+      const result = removeHook(git);
+      if (!result.ok) {
+        ui.fail(result.message);
+        if (result.hint) for (const l of result.hint.split("\n")) ui.detail(l);
+        return EXIT.preflight;
+      }
+      ui.ok(result.message);
+      await telemetry.flush({ command: "remove-hook", exit_code: EXIT.ok });
+      return EXIT.ok;
+    }
+
+    case "push": {
+      const opts = toRunOptions(command.flags, config);
+      const cacheFile = gitPath(git, "pullpal/passed-trees");
+
+      const deps: WorkflowDeps = {
+        git,
+        ui,
+        detectTests: detect,
+        isRunnable: runnable,
+        // Hook mode must never inherit stdin: that is where git's ref list lives.
+        runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
+        testCache: cacheFile ? createFileTestCache(cacheFile) : createMemoryTestCache(),
+      };
+
+      const shared = {
+        no_sync: !opts.sync,
+        no_tests: !opts.tests,
+        dry_run: opts.dryRun,
+        sync_policy: opts.syncPolicy,
+      };
+
+      if (opts.hookMode) {
+        // pull-pal's own push already ran every one of these checks.
+        if (isInternalInvocation()) return EXIT.ok;
+        const refs = readPushRefs();
+        const outcome = await runGate(deps, { ...opts, refs });
+        await telemetry.flush({
+          ...shared,
+          command: "gate",
+          hook_mode: true,
+          hook_gate_result: outcome.blocked ?? "allowed",
+          test_runner: outcome.testRunner,
+          tests_passed: outcome.testsPassed,
+          exit_code: outcome.exitCode,
+        });
+        return outcome.exitCode;
+      }
+
+      const outcome = await runPush(deps, opts);
+      await telemetry.flush({
+        ...shared,
+        command: "push",
+        rebased: outcome.rebased,
+        test_runner: outcome.testRunner,
+        tests_passed: outcome.testsPassed,
+        push_succeeded: outcome.pushed,
+        blocked: outcome.blocked,
+        exit_code: outcome.exitCode,
+      });
+      return outcome.exitCode;
+    }
+  }
 }
 
-entry().catch(async (e: unknown) => {
-  fail((e as Error).message ?? String(e));
-  await flushAndExit(1, { command: "push", exit_code: 1, push_succeeded: false });
-});
+main(process.argv.slice(2))
+  .then((code) => process.exit(code))
+  .catch((error: unknown) => {
+    const ui = createUi();
+    if (isUserFacing(error)) {
+      ui.fail(error.message);
+      if (error.hint) {
+        for (const line of error.hint.split("\n")) ui.detail(line);
+      }
+      process.exit(error.exitCode);
+    }
+    ui.fail("pull-pal hit an unexpected error — this is a bug.");
+    ui.detail("Please report it: https://github.com/nikeproduct/pull-pal/issues");
+    ui.detail(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    process.exit(EXIT.internal);
+  });

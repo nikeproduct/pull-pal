@@ -1,0 +1,157 @@
+/**
+ * The data the decision core reasons about.
+ *
+ * State is gathered in two phases because the interesting comparisons only
+ * become true after a fetch:
+ *   BaseState  — cheap, local, read before any network access (drives preflight)
+ *   SyncState  — ahead/behind facts, read after fetch (drives the sync decision)
+ *
+ * Everything here is plain data so `core/plan.ts` can stay a pure function of it.
+ */
+
+export type OperationInProgress = "rebase" | "merge" | "cherry-pick" | "revert" | "bisect";
+
+export interface BaseState {
+  isRepo: boolean;
+  /** Repo root, or null when not in a repo. */
+  root: string | null;
+  /** True when HEAD is not on a branch. */
+  detached: boolean;
+  /** Current branch, or null when detached / unborn. */
+  branch: string | null;
+  /** True before the first commit exists. */
+  unborn: boolean;
+  remotes: string[];
+  /**
+   * Tracked-file modifications only. Untracked files do NOT block a rebase, so
+   * they must not count as dirty — that distinction is what made v0.1 give the
+   * wrong advice on a dirty tree.
+   */
+  dirty: boolean;
+  operationInProgress: OperationInProgress | null;
+}
+
+export interface SyncState {
+  /** The remote this push targets. */
+  remote: string;
+  /** Default branch of `remote` (e.g. "main"), or null if undeterminable. */
+  defaultBranch: string | null;
+  /**
+   * `branch.<name>.pullpalBase`: the remote branch this one is based on, when it
+   * is not the default branch (a stacked PR, a branch off `develop`).
+   */
+  configuredBase: string | null;
+  /**
+   * The remote branch this push updates (e.g. "origin/feature"), when it exists
+   * on the remote. Usually the branch's upstream; in a fork workflow, the branch
+   * on the push remote.
+   */
+  upstream: string | null;
+  /** Commits on HEAD not on upstream. null = no upstream / not computable. */
+  aheadUpstream: number | null;
+  /** Commits on upstream not in HEAD. null = no upstream / not computable. */
+  behindUpstream: number | null;
+}
+
+/** What sync compares HEAD against, chosen purely by `chooseTarget`. */
+export interface SyncTarget {
+  /** e.g. "origin/main"; null when there is nothing to compare against. */
+  ref: string | null;
+  /** Why — shown when there is no target, and by --dry-run and doctor. */
+  reason: string;
+  /** Non-fatal problem worth showing (e.g. default branch undeterminable). */
+  warning?: string;
+}
+
+/** How HEAD relates to the target, measured once the target is known. */
+export interface Comparison {
+  /** Commits on the target not in HEAD. null = not computable. */
+  behind: number | null;
+  /**
+   * Paths that would conflict if HEAD were merged with the target. Empty means
+   * it merges cleanly; null means the check could not run (git < 2.38, or
+   * unrelated histories).
+   */
+  conflicts: string[] | null;
+}
+
+/** What the sync step should do. Produced purely; executed by the workflow. */
+export interface SyncDecision {
+  action: "none" | "rebase";
+  /** Ref to rebase onto, e.g. "origin/main". Set when action === "rebase". */
+  onto: string | null;
+  /** Human-readable explanation — surfaced by --dry-run and doctor. */
+  reason: string;
+  /** Non-fatal problem worth showing (e.g. default branch undeterminable). */
+  warning?: string;
+  /** When set, the push must stop before doing anything else. */
+  block?: { kind: "conflicts" | "diverged"; reason: string; hint: string };
+}
+
+export interface PushPlan {
+  args: string[];
+  /** True when pull-pal added --force-with-lease itself. */
+  forceLeaseAdded: boolean;
+}
+
+/**
+ * check    — compare with the base branch; block only on real conflicts (default)
+ * rebase   — rebase onto the base branch when behind it and it applies cleanly
+ * upstream — rebase onto the branch's own upstream when behind it
+ * off      — fetch, but never compare or rebase
+ */
+export type SyncPolicy = "check" | "rebase" | "upstream" | "off";
+
+/** What a conflict with the base branch does to the push. */
+export type ConflictMode = "block" | "warn";
+
+/**
+ * What a push actually sends, relative to the checked-out branch. pull-pal can
+ * only vouch for HEAD: it tests the working copy and syncs the current branch,
+ * so a push of anything else must not borrow those checks.
+ */
+export interface PushScope {
+  /** Every ref being pushed is the checked-out commit — the tests apply to it. */
+  testsHead: boolean;
+  /** HEAD is pushed to its own remote branch — sync, and any lease, apply to it. */
+  syncsHead: boolean;
+  /** What is being pushed, for messages when it is not simply HEAD. */
+  description: string;
+}
+
+/** A resolved test command, produced by the detection engine. */
+export interface TestPlan {
+  command: string;
+  args: string[];
+  /** What we show the user, e.g. "bun run test". */
+  label: string;
+  /** Which detector produced this — surfaced by --dry-run and doctor. */
+  source: string;
+  /**
+   * Run through the platform shell. Only set for user-configured commands, which
+   * are free-form strings ("make check && ./verify.sh") rather than argv.
+   */
+  shell?: boolean;
+  /**
+   * An exit code meaning "ran, but found no tests" — pytest's 5. Not a failure:
+   * a project that has no tests yet should not be blocked from pushing.
+   */
+  noTestsExitCode?: number;
+}
+
+/** Resolved run options — flags merged over config merged over defaults. */
+export interface RunOptions {
+  /** false = --no-sync: skip fetch AND rebase (v0.1 skipped only the rebase). */
+  sync: boolean;
+  tests: boolean;
+  dryRun: boolean;
+  hookMode: boolean;
+  syncPolicy: SyncPolicy;
+  onConflict: ConflictMode;
+  /** Branch patterns never synced against the default branch. */
+  longLived: readonly string[];
+  /** Skip the suite when this exact tree already passed with this command. */
+  useTestCache: boolean;
+  /** Args forwarded verbatim to `git push`. */
+  gitArgs: string[];
+}

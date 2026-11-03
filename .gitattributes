@@ -1,0 +1,10 @@
+# Normalize to LF in the repo. The generated pre-push hook and the shipped shell
+# launchers MUST have LF endings or they break on POSIX shells.
+* text=auto eol=lf
+
+# Binaries and archives are never touched.
+*.png binary
+*.gz binary
+*.exe binary
+npm-packages/**/pull-pal binary
+npm-packages/**/pull-pal.exe binary

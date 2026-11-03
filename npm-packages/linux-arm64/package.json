@@ -1,0 +1,17 @@
+{
+  "name": "@nikeproduct/pull-pal-linux-arm64",
+  "version": "0.2.0",
+  "description": "pull-pal Linux arm64 binary",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "author": "nikeproduct",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikeproduct/pull-pal.git"
+  },
+  "files": [
+    "pull-pal",
+    "README.md"
+  ]
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Publishes all npm packages in the correct order:
- *   1. Four platform-specific packages (@nikeproduct/pull-pal-*)
+ *   1. The platform-specific packages (@nikeproduct/pull-pal-*), from scripts/platforms.ts
  *   2. Main pull-pal package (depends on the above via optionalDependencies)
  *
  * Usage:
@@ -10,15 +10,13 @@
 
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { PLATFORMS } from "./platforms";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 
 const packages = [
-  join(ROOT, "npm-packages", "darwin-arm64"),
-  join(ROOT, "npm-packages", "darwin-x64"),
-  join(ROOT, "npm-packages", "linux-x64"),
-  join(ROOT, "npm-packages", "win32-x64"),
+  ...PLATFORMS.map((p) => join(ROOT, "npm-packages", p.key)),
   join(ROOT, "npm"),
 ];
 
