@@ -7,9 +7,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { reportTestStep } from "../../src/core/test-step";
+import { shellPlan } from "../../src/detect/index";
 import { createTelemetry } from "../../src/telemetry/index";
 import {
   analyticsEnabled,
@@ -18,6 +20,7 @@ import {
   readState,
   setOptOut,
 } from "../../src/telemetry/state";
+import { recordingUi } from "../helpers/harness";
 
 let dir: string;
 
@@ -88,6 +91,23 @@ describe("state", () => {
     setOptOut(dir, false);
     expect(readState(dir)?.optOut).toBe(false);
   });
+
+  // e.g. analytics.json left owned by root after a `sudo pull-pal` run. The CLI
+  // must not print "Analytics disabled" while events keep being sent.
+  test.skipIf(process.getuid?.() === 0)(
+    "setOptOut reports failure when the change cannot be saved",
+    () => {
+      loadOrInit(dir, {});
+      const file = join(dir, "analytics.json");
+      chmodSync(file, 0o444);
+      try {
+        expect(setOptOut(dir, true)).toBeNull();
+        expect(readState(dir)?.optOut).toBe(false);
+      } finally {
+        chmodSync(file, 0o644);
+      }
+    },
+  );
 });
 
 describe("install source", () => {
@@ -195,6 +215,26 @@ describe("sending", () => {
       expect(serialized).not.toContain(process.cwd());
       for (const forbidden of ["branch", "remote", "repo_name", "path", "email"]) {
         expect(Object.keys(body.properties)).not.toContain(forbidden);
+      }
+    });
+  });
+
+  // A configured command is free text: tokens, usernames, repository paths.
+  test("a configured test command never reaches the payload", async () => {
+    const command = "API_TOKEN=abc123 /Users/alice/acme-repo/scripts/ci.sh";
+    const plan = shellPlan(command, "linux", "config:pullpal.testCommand");
+    const { ui } = recordingUi();
+    const summary = reportTestStep(ui, { kind: "passed", plan }, false);
+
+    await withCapturingServer(async ({ url, bodies }) => {
+      loadOrInit(dir, {});
+      const t = createTelemetry({ endpoint: url, configDir: dir, env: {} });
+      await t.flush({ command: "push", test_runner: summary.runner, tests_passed: true });
+
+      const serialized = JSON.stringify(bodies);
+      expect(serialized).toContain("config:pullpal.testCommand");
+      for (const secret of ["abc123", "alice", "acme-repo", "ci.sh"]) {
+        expect(serialized).not.toContain(secret);
       }
     });
   });

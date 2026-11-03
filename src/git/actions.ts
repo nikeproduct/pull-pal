@@ -7,6 +7,7 @@
  */
 
 import type { GitRunner } from "./exec";
+import { SYNC_NAMESPACE, operationInProgress, readChanges } from "./queries";
 
 /** Marks a `git push` as originating from pull-pal, so our own hook stands down. */
 export const INTERNAL_ENV = "PULLPAL_INTERNAL";
@@ -17,15 +18,35 @@ export interface ActionResult {
   message: string;
 }
 
+/**
+ * Fetch `remote`'s branches into pull-pal's own namespace (see SYNC_NAMESPACE).
+ *
+ * `--refmap=` stops git from also updating the configured remote-tracking refs
+ * as a side effect, `--prune` drops copies of branches deleted on the remote,
+ * and tags are left alone — nothing outside refs/pull-pal is written.
+ */
 export function fetch(git: GitRunner, remote: string): ActionResult {
-  const r = git.capture(["fetch", remote]);
+  const r = git.capture([
+    "fetch",
+    "--no-tags",
+    "--prune",
+    "--refmap=",
+    remote,
+    `+refs/heads/*:${SYNC_NAMESPACE}/${remote}/*`,
+  ]);
   return { ok: r.exitCode === 0, message: r.stderr || r.stdout };
 }
 
-export interface RebaseResult extends ActionResult {
-  /** True when the rebase failed and we successfully restored the pre-rebase state. */
-  aborted: boolean;
-}
+export type RebaseResult =
+  | { ok: true }
+  /**
+   * `state` says where the repository was left:
+   *   not-started — git refused before rewriting anything (e.g. an untracked
+   *                 file in the way); the branch is exactly as it was
+   *   aborted     — it started, failed, and was rolled back
+   *   in-progress — it started and could not be rolled back
+   */
+  | { ok: false; message: string; state: "not-started" | "aborted" | "in-progress" };
 
 /**
  * Rebase onto `onto` with --autostash.
@@ -33,19 +54,19 @@ export interface RebaseResult extends ActionResult {
  * --autostash means a dirty working tree is stashed and reapplied rather than
  * rejected, and `git rebase --abort` restores both the original commit and the
  * stash. On any failure we abort so the user is never left mid-rebase holding a
- * conflict they did not ask for.
+ * conflict they did not ask for — and report what actually happened by looking
+ * at the repository, not at whether `--abort` succeeded, which also fails when
+ * there was never a rebase to abort.
  */
 export function rebase(git: GitRunner, onto: string): RebaseResult {
   const r = git.capture(["rebase", "--autostash", onto]);
-  if (r.exitCode === 0) {
-    return { ok: true, message: "", aborted: false };
-  }
-  const abort = git.capture(["rebase", "--abort"]);
-  return {
-    ok: false,
-    message: r.stderr || r.stdout,
-    aborted: abort.exitCode === 0,
-  };
+  if (r.exitCode === 0) return { ok: true };
+
+  const message = r.stderr || r.stdout;
+  if (operationInProgress(git) !== "rebase") return { ok: false, message, state: "not-started" };
+  git.capture(["rebase", "--abort"]);
+  const state = operationInProgress(git) === "rebase" ? "in-progress" : "aborted";
+  return { ok: false, message, state };
 }
 
 /** Identifies our stash entry, so the user can find it if a restore ever fails. */
@@ -59,11 +80,6 @@ export type SetAside =
   /** Changes exist but none could be stashed; tests would see them. */
   | { kind: "not-isolated" }
   | { kind: "failed"; message: string };
-
-function porcelain(git: GitRunner): string | null {
-  const r = git.capture(["status", "--porcelain"]);
-  return r.exitCode === 0 ? r.stdout : null;
-}
 
 function stashTip(git: GitRunner): string | null {
   const r = git.capture(["rev-parse", "--verify", "--quiet", "refs/stash"]);
@@ -79,7 +95,7 @@ function stashTip(git: GitRunner): string | null {
  * code, and removing them would make every test run a cold one.
  */
 export function setAsideChanges(git: GitRunner): SetAside {
-  const before = porcelain(git);
+  const before = readChanges(git);
   if (before === null) return { kind: "failed", message: "could not read the working tree status" };
   if (before === "") return { kind: "clean" };
 
@@ -89,7 +105,7 @@ export function setAsideChanges(git: GitRunner): SetAside {
 
   const tip = stashTip(git);
   if (!tip || tip === previousTip) return { kind: "not-isolated" };
-  return { kind: "stashed", stash: tip, isolated: porcelain(git) === "" };
+  return { kind: "stashed", stash: tip, isolated: readChanges(git) === "" };
 }
 
 /**
@@ -112,23 +128,14 @@ export function restoreChanges(git: GitRunner, stash: string): ActionResult {
   return { ok: plain.exitCode === 0, message: plain.stderr || plain.stdout };
 }
 
-export interface PushOptions {
-  /** Attach the user's terminal so they see git's progress output. */
-  passthrough?: boolean;
-}
-
 /**
- * Run `git push`. The child is marked with PULLPAL_INTERNAL so that if a
- * pre-push hook is installed it recognises our own push and exits immediately
- * instead of re-running the whole workflow (the v0.1 double-test bug).
+ * Run `git push` with the user's terminal attached. The child is marked with
+ * PULLPAL_INTERNAL so that if a pre-push hook is installed it recognises our own
+ * push and exits immediately instead of re-running the whole workflow (the v0.1
+ * double-test bug).
  */
-export function push(git: GitRunner, args: string[], opts: PushOptions = {}): number {
-  const env = { [INTERNAL_ENV]: "1" };
-  if (opts.passthrough === false) {
-    const r = git.capture(["push", ...args]);
-    return r.exitCode;
-  }
-  return git.passthrough(["push", ...args], { env });
+export function push(git: GitRunner, args: string[]): number {
+  return git.passthrough(["push", ...args], { env: { [INTERNAL_ENV]: "1" } });
 }
 
 /** True when this process was spawned by pull-pal's own push. */

@@ -41,6 +41,33 @@ describe("informational commands", () => {
       expect(repo.sha("HEAD")).toBe(before);
     });
   });
+
+  // It used to resolve an unknown default branch with ls-remote and then cache
+  // it as origin/HEAD: a network call and a ref write from a diagnostic.
+  test("doctor makes no network calls and writes no refs", async () => {
+    await withRepo(async (repo) => {
+      expect(repo.git(["remote", "set-head", "origin", "--delete"]).exitCode).toBe(0);
+
+      const r = await repo.runPullPal(["doctor"]);
+
+      expect(r.exitCode).toBe(EXIT.ok);
+      expect(r.stdout).toContain("not known locally");
+      const head = repo.git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+      expect(head.exitCode).not.toBe(0);
+    });
+  });
+
+  // It used to assume origin; the push follows remote.pushDefault.
+  test("doctor names the remote a push would actually use", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["remote", "add", "fork", repo.remoteDir]);
+      repo.git(["config", "remote.pushDefault", "fork"]);
+
+      const r = await repo.runPullPal(["doctor"]);
+
+      expect(r.stdout).toContain("pushes to       fork");
+    });
+  });
 });
 
 describe("push", () => {

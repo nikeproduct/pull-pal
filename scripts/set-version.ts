@@ -15,6 +15,7 @@
 import { join, dirname } from "path";
 import { readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
+import { PLATFORMS } from "./platforms";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -35,14 +36,13 @@ const TARGETS: Target[] = [
     patterns: [
       /"version":\s*"([^"]+)"/,
       // optionalDependencies pins to the platform packages
-      /"@nikeproduct\/pull-pal-(?:darwin-arm64|darwin-x64|linux-x64|linux-arm64|win32-x64)":\s*"([^"]+)"/g,
+      /"@nikeproduct\/pull-pal-[a-z0-9-]+":\s*"([^"]+)"/g,
     ],
   },
-  { file: "npm-packages/darwin-arm64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
-  { file: "npm-packages/darwin-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
-  { file: "npm-packages/linux-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
-  { file: "npm-packages/linux-arm64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
-  { file: "npm-packages/win32-x64/package.json", patterns: [/"version":\s*"([^"]+)"/] },
+  ...PLATFORMS.map((p) => ({
+    file: `npm-packages/${p.key}/package.json`,
+    patterns: [/"version":\s*"([^"]+)"/],
+  })),
   { file: "Formula/pull-pal.rb", patterns: [/^  version "([^"]+)"/m] },
 ];
 

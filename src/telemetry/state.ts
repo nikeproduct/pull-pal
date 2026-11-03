@@ -31,7 +31,7 @@ export function defaultConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.PULLPAL_CONFIG_DIR || join(homedir(), ".pull-pal");
 }
 
-function statePath(dir: string): string {
+export function statePath(dir: string): string {
   return join(dir, "analytics.json");
 }
 
@@ -136,10 +136,16 @@ export function analyticsEnabled(
   return true;
 }
 
+/**
+ * Persist the opt-out flag. Returns the saved state, or null when the change did
+ * not reach the disk — `writeState` is best-effort, so the file is read back:
+ * reporting "Analytics disabled" while events keep flowing would break the one
+ * promise this command makes.
+ */
 export function setOptOut(dir: string, value: boolean): AnalyticsState | null {
   const { state } = loadOrInit(dir);
   if (!state) return null;
-  const updated = { ...state, optOut: value };
-  writeState(dir, updated);
-  return updated;
+  writeState(dir, { ...state, optOut: value });
+  const saved = readState(dir);
+  return saved?.optOut === value ? saved : null;
 }

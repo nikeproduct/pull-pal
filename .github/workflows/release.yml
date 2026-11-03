@@ -22,6 +22,9 @@ jobs:
   verify:
     name: Verify
     uses: ./.github/workflows/ci.yml
+    with:
+      # The same code the build job below publishes.
+      ref: ${{ inputs.tag || github.ref }}
 
   build:
     name: Build release artifacts

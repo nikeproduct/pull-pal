@@ -114,6 +114,12 @@ describe("python", () => {
     expect(detect({ files })?.command).toBe("pytest");
   });
 
+  // pytest exits 5 when it collects nothing; a project with no tests yet must
+  // not be blocked from pushing.
+  test("knows pytest's no-tests exit code", () => {
+    expect(detect({ files: { "pytest.ini": "" } })?.noTestsExitCode).toBe(5);
+  });
+
   // The root cause of v0.1's ENOENT crashes: pyproject.toml ≠ pytest.
   test("a pyproject.toml that never mentions pytest detects nothing", () => {
     const plan = detect({
@@ -135,7 +141,13 @@ describe("gradle", () => {
       { files: { "gradlew.bat": "", "build.gradle": "" } },
       { platform: "win32" },
     );
-    expect(plan?.command).toBe("gradlew.bat");
+    expect(plan?.command).toBe("./gradlew.bat");
+  });
+
+  // Repo-relative, so it is resolved against the repo root rather than looked
+  // up on PATH — where a bare gradlew.bat is never found.
+  test("the wrapper is marked as living in the repository", () => {
+    expect(detect({ files: { gradlew: "" } }, { platform: "linux" })?.command).toBe("./gradlew");
   });
 
   test("falls back to system gradle without a wrapper", () => {
@@ -173,9 +185,32 @@ describe("ruby", () => {
     expect(plan?.label).toBe("bundle exec rspec");
   });
 
+  const RAKEFILE =
+    'require "rake/testtask"\nRake::TestTask.new do |t|\n  t.pattern = "test/**/*_test.rb"\nend\n';
+
   // v0.1's hasDir never checked isDirectory, so a *file* named spec chose rspec.
   test("a file named spec does not select rspec", () => {
-    const plan = detect({ files: { Gemfile: "", spec: "not a directory" } });
+    const plan = detect({ files: { Gemfile: "", spec: "not a directory", Rakefile: RAKEFILE } });
+    expect(plan?.label).toBe("bundle exec rake test");
+  });
+
+  // Bundler for tooling only (fastlane, Jekyll): rake test would fail every push.
+  test("a Gemfile alone is not a test suite", () => {
+    expect(detect({ files: { Gemfile: "" } })).toBeNull();
+  });
+
+  test("a Rakefile without a test task is not one either", () => {
+    expect(detect({ files: { Gemfile: "", Rakefile: "task :build do\nend\n" } })).toBeNull();
+  });
+
+  test.each([
+    ["Rake::TestTask", RAKEFILE],
+    ["task :test", "task :test do\n  sh 'ruby -Itest test/all.rb'\nend\n"],
+    ['task "test"', 'task "test" do\nend\n'],
+    ["task test: [...]", "task test: [:compile]\n"],
+    ["a Rails app", 'require_relative "config/application"\nRails.application.load_tasks\n'],
+  ])("runs rake test for %s", (_, rakefile) => {
+    const plan = detect({ files: { Gemfile: "", Rakefile: rakefile } });
     expect(plan?.label).toBe("bundle exec rake test");
   });
 });
@@ -198,10 +233,10 @@ describe("priority and overrides", () => {
       "-c",
       "a && b",
     ]);
-    expect(detect({ files: {} }, { override: "a && b", platform: "win32" })?.args).toEqual([
-      "/c",
-      "a && b",
-    ]);
+    // /s strips only the outer quotes, so quotes inside the command survive.
+    expect(
+      detect({ files: {} }, { override: 'npm test -- --grep "my suite"', platform: "win32" })?.args,
+    ).toEqual(["/d", "/s", "/c", '"npm test -- --grep "my suite""']);
   });
 
   test("a package.json pull-pal.test block overrides detection", () => {
@@ -224,6 +259,6 @@ describe("priority and overrides", () => {
   test("every plan reports which detector produced it", () => {
     expect(detect({ files: { "Cargo.toml": "" } })?.source).toBe("rust:cargo");
     expect(detect({ files: { "go.mod": "" } })?.source).toBe("go:modules");
-    expect(detect({ files: { Gemfile: "" } })?.source).toBe("ruby:rake");
+    expect(detect({ files: { Gemfile: "", Rakefile: "task :test\n" } })?.source).toBe("ruby:rake");
   });
 });

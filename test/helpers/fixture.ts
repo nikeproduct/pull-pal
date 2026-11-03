@@ -29,6 +29,18 @@ export const ENTRY = join(HERE, "..", "..", "src", "index.ts");
 process.env.PULLPAL_NO_ANALYTICS = "1";
 process.env.PULLPAL_CONFIG_DIR = mkdtempSync(join(tmpdir(), "pullpal-test-home-"));
 
+/**
+ * ...nor read or write the developer's git config. A global `core.hooksPath`
+ * would make `pull-pal setup` install a hook pointing at this checkout into a
+ * directory every repo on the machine uses, and global `pullpal.*` settings
+ * would change test outcomes. Every repo the fixture makes configures what it
+ * needs locally.
+ */
+const isolatedGitConfig = join(process.env.PULLPAL_CONFIG_DIR, "gitconfig");
+writeFileSync(isolatedGitConfig, "");
+process.env.GIT_CONFIG_GLOBAL = isolatedGitConfig;
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+
 export interface ExecResult {
   stdout: string;
   stderr: string;

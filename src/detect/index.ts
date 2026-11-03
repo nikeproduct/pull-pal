@@ -38,11 +38,17 @@ export const DETECTORS: ReadonlyArray<{
   { name: "ruby", run: detectRuby },
 ];
 
-/** Wrap a free-form user command so the platform shell interprets it. */
+/**
+ * Wrap a free-form user command so the platform shell interprets it.
+ *
+ * On Windows the command must reach cmd.exe exactly as written. `/s /c "..."`
+ * tells cmd to strip only the outer quotes, and runTests passes the arguments
+ * verbatim, so quotes inside the command (`--grep "my suite"`) survive.
+ */
 export function shellPlan(command: string, platform: NodeJS.Platform, source: string): TestPlan {
   return {
     command: platform === "win32" ? "cmd" : "sh",
-    args: platform === "win32" ? ["/c", command] : ["-c", command],
+    args: platform === "win32" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command],
     label: command,
     source,
     shell: true,

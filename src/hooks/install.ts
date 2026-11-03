@@ -12,11 +12,23 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { dirname, join } from "node:path";
 import type { GitRunner } from "../git/exec";
 import { gitPath } from "../git/queries";
-import { HOOK_VERSION, hookVersionOf, isOurHook, renderHook } from "./template";
+import {
+  HOOK_VERSION,
+  hookMatches,
+  hookVersionOf,
+  isOurHook,
+  renderHook,
+  shellPath,
+} from "./template";
 
 export type HookState =
   | { kind: "no-repo" }
   | { kind: "absent"; path: string }
+  /**
+   * `current` means byte-for-byte what `setup` would write now. A hook of the
+   * current version can still be stale: it embeds pull-pal's absolute path,
+   * which a Homebrew upgrade, an nvm switch or a reinstall changes.
+   */
   | { kind: "ours"; path: string; version: number | null; current: boolean }
   | { kind: "foreign"; path: string };
 
@@ -35,7 +47,7 @@ export function prePushPath(git: GitRunner): string | null {
   return dir ? join(dir, "pre-push") : null;
 }
 
-export function readHookState(git: GitRunner): HookState {
+export function readHookState(git: GitRunner, invocation = currentInvocation()): HookState {
   const path = prePushPath(git);
   if (!path) return { kind: "no-repo" };
   if (!existsSync(path)) return { kind: "absent", path };
@@ -49,7 +61,7 @@ export function readHookState(git: GitRunner): HookState {
 
   if (!isOurHook(content)) return { kind: "foreign", path };
   const version = hookVersionOf(content);
-  return { kind: "ours", path, version, current: version === HOOK_VERSION };
+  return { kind: "ours", path, version, current: hookMatches(content, invocation) };
 }
 
 /** One-line summary for `doctor`. */
@@ -62,9 +74,14 @@ export function describeHookState(state: HookState): string {
     case "foreign":
       return `present, but not written by pull-pal (${state.path})`;
     case "ours":
-      return state.current
-        ? `installed (v${state.version}) at ${state.path}`
-        : `installed but outdated (v${state.version ?? "?"} → v${HOOK_VERSION}); run: pull-pal setup`;
+      if (state.current) return `installed (v${state.version}) at ${state.path}`;
+      if (state.version === 0) {
+        return "installed by pull-pal 0.1 — it calls pull-pal off PATH, which GUI clients lack; run: pull-pal setup";
+      }
+      if (state.version === HOOK_VERSION) {
+        return "installed, but it runs a pull-pal binary that has moved or been upgraded; run: pull-pal setup";
+      }
+      return `installed but outdated (v${state.version ?? "?"} → v${HOOK_VERSION}); run: pull-pal setup`;
   }
 }
 
@@ -84,17 +101,19 @@ export function currentInvocation(argv = process.argv): string[] {
 }
 
 export function installHook(git: GitRunner, invocation = currentInvocation()): HookActionResult {
-  const state = readHookState(git);
+  const state = readHookState(git, invocation);
 
   if (state.kind === "no-repo") {
     return { ok: false, message: "Not inside a git repository." };
   }
 
   if (state.kind === "foreign") {
+    // By absolute path, for the same reason the generated hook uses one.
+    const command = invocation.map((part) => `"${shellPath(part)}"`).join(" ");
     return {
       ok: false,
       message: `A pre-push hook already exists and was not written by pull-pal:\n  ${state.path}`,
-      hint: 'Add this line to it manually:\n  pull-pal --hook-mode "$@"',
+      hint: `Add this line to it manually:\n  ${command} --hook-mode "$@" || exit $?`,
     };
   }
 

@@ -125,7 +125,7 @@ describe("push pipeline", () => {
     });
   });
 
-  test("sync policy off fetches but never compares or rebases", async () => {
+  test("sync policy off never compares or rebases", async () => {
     await withRepo(async (repo) => {
       repo.advanceRemote("main", "teammate work");
       const h = makeDeps(repo.dir);
@@ -133,9 +133,7 @@ describe("push pipeline", () => {
       const result = await runPush(h.deps, options({ syncPolicy: "off" }));
 
       expect(result.rebased).toBe(false);
-      expect(h.ui.text()).toContain("disabled");
-      // The fetch still happened, so we know about the teammate's commit.
-      expect(repo.git(["rev-parse", "origin/main"]).stdout).not.toBe(repo.sha("HEAD"));
+      expect(h.ui.text()).not.toContain("behind");
     });
   });
 
@@ -191,7 +189,7 @@ describe("sync=check (the default)", () => {
       expect(h.testRuns).toBe(0);
       expect(remoteSha(repo, "feature")).toBe(remoteBefore);
       expect(h.ui.text()).toContain("README.md");
-      expect(h.ui.text()).toContain("git rebase origin/main");
+      expect(h.ui.text()).toContain("git pull --rebase origin main");
       // The check is in memory: nothing to clean up afterwards.
       expect(repo.git(["status", "--porcelain"]).stdout).toBe("");
     });
@@ -483,7 +481,8 @@ describe("divergence guard", () => {
    * The dangerous shape: we are behind the default branch (so pull-pal will
    * rebase and therefore force-push) *and* a teammate has pushed to our own
    * branch. Without the guard, that force-push silently destroys their commit —
-   * and --force-with-lease does not help, because this run already fetched.
+   * and pull-pal's lease does not help: it is pinned to what this run fetched,
+   * which already includes the teammate's commit.
    */
   function setUpDivergence(repo: Fixture) {
     repo.git(["checkout", "-q", "-b", "feature"]);
@@ -509,6 +508,23 @@ describe("divergence guard", () => {
       // The teammate's commit is still the tip of the remote branch.
       expect(remoteSha(repo, "feature")).toBe(teammate);
       expect(h.ui.text()).toContain("would destroy them");
+    });
+  });
+
+  // A bare lease trusts refs/remotes/*, which the user may not have looked at,
+  // so it is not the "I know what I am overwriting" that --force is.
+  test("a bare --force-with-lease leaves the guard on", async () => {
+    await withRepo(async (repo) => {
+      const { teammate } = setUpDivergence(repo);
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(
+        h.deps,
+        options({ syncPolicy: "rebase", gitArgs: ["--force-with-lease"] }),
+      );
+
+      expect(result.blocked).toBe("diverged-upstream");
+      expect(remoteSha(repo, "feature")).toBe(teammate);
     });
   });
 
@@ -641,6 +657,213 @@ describe("--no-sync", () => {
       expect(result.pushed).toBe(true);
       const head = repo.git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
       expect(head.exitCode).not.toBe(0);
+    });
+  });
+});
+
+/**
+ * pull-pal fetches into refs/pull-pal/* and never moves refs/remotes/*. Those
+ * refs are what a bare --force-with-lease compares against; a fetch that moved
+ * them would make every such lease agree with the remote, protecting nothing.
+ */
+describe("the user's remote-tracking refs are left alone (review #1, #4)", () => {
+  test("a run compares against the fresh remote without moving origin/main", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo);
+      const stale = repo.sha("origin/main");
+      const teammate = repo.advanceRemote("main", "teammate work");
+      repo.commit("more", { "g.txt": "g" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options());
+
+      expect(result.pushed).toBe(true);
+      expect(h.ui.text()).toContain("behind origin/main by 1 commit");
+      expect(repo.sha("refs/pull-pal/origin/main")).toBe(teammate);
+      expect(repo.sha("origin/main")).toBe(stale);
+    });
+  });
+
+  test("a bare --force-with-lease still refuses to overwrite a commit you never fetched", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo);
+      const teammate = repo.advanceRemote("feature", "teammate on my branch");
+      repo.git(["commit", "-q", "--amend", "-m", "feature work, amended"]);
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ gitArgs: ["--force-with-lease"] }));
+
+      // Exactly what plain `git push --force-with-lease` does: stale, rejected.
+      expect(result.pushed).toBe(false);
+      expect(remoteSha(repo, "feature")).toBe(teammate);
+    });
+  });
+
+  test("sync policy off fetches nothing", async () => {
+    await withRepo(async (repo) => {
+      repo.advanceRemote("main", "teammate work");
+      const h = makeDeps(repo.dir);
+
+      await runPush(h.deps, options({ syncPolicy: "off" }));
+
+      expect(h.ui.text()).not.toContain("Fetching");
+      const copy = repo.git(["rev-parse", "--verify", "--quiet", "refs/pull-pal/origin/main"]);
+      expect(copy.exitCode).not.toBe(0);
+    });
+  });
+});
+
+describe("where the push goes (review #11)", () => {
+  function addFork(repo: Fixture): string {
+    const forkDir = join(repo.remoteDir, "..", "fork.git");
+    repo.git(["init", "-q", "--bare", forkDir]);
+    repo.git(["remote", "add", "fork", forkDir]);
+    repo.git(["push", "-q", "fork", "main"]);
+    return forkDir;
+  }
+
+  const shaOn = (repo: Fixture, dir: string, branch: string) =>
+    repo.git(["ls-remote", dir, `refs/heads/${branch}`]).stdout.split(/\s+/)[0] ?? "";
+
+  test("remote.pushDefault publishes a new branch to that remote, not origin", async () => {
+    await withRepo(async (repo) => {
+      const forkDir = addFork(repo);
+      repo.git(["config", "remote.pushDefault", "fork"]);
+      repo.git(["checkout", "-q", "-b", "feature"]);
+      const sha = repo.commit("feature work", { "f.txt": "f" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options());
+
+      expect(result.pushed).toBe(true);
+      expect(shaOn(repo, forkDir, "feature")).toBe(sha);
+      expect(remoteSha(repo, "feature")).toBe("");
+    });
+  });
+
+  test("branch.<name>.pushRemote wins over the upstream remote", async () => {
+    await withRepo(async (repo) => {
+      const forkDir = addFork(repo);
+      publishFeature(repo); // upstream: origin/feature
+      repo.git(["config", "branch.feature.pushRemote", "fork"]);
+      const sha = repo.commit("more", { "g.txt": "g" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options());
+
+      expect(result.pushed).toBe(true);
+      expect(shaOn(repo, forkDir, "feature")).toBe(sha);
+      expect(remoteSha(repo, "feature")).not.toBe(sha);
+    });
+  });
+
+  test("--repo is honoured, not overridden by an added positional", async () => {
+    await withRepo(async (repo) => {
+      const forkDir = addFork(repo);
+      repo.git(["checkout", "-q", "-b", "feature"]);
+      const sha = repo.commit("feature work", { "f.txt": "f" });
+
+      const h = makeDeps(repo.dir);
+      const result = await runPush(h.deps, options({ gitArgs: ["--repo=fork"] }));
+
+      expect(result.pushed).toBe(true);
+      expect(shaOn(repo, forkDir, "feature")).toBe(sha);
+      expect(remoteSha(repo, "feature")).toBe("");
+    });
+  });
+});
+
+describe("smaller review fixes", () => {
+  // Review #12: git refused before rewriting anything, so there is no rebase to
+  // continue — the old advice (`git rebase --continue`) failed.
+  test("a rebase that never started is reported as such", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo);
+      repo.advanceRemote("main", "adds x", { "x.txt": "theirs\n" });
+      repo.writeFile("x.txt", "mine, untracked\n");
+      const before = repo.sha("HEAD");
+
+      const h = makeDeps(repo.dir);
+      const error = await runPush(h.deps, options({ syncPolicy: "rebase" })).catch(
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(UserFacingError);
+      const hint = (error as UserFacingError).hint ?? "";
+      expect(hint).toContain("could not start");
+      expect(hint).not.toContain("rebase --continue");
+      expect(repo.sha("HEAD")).toBe(before);
+      expect(readFileSync(join(repo.dir, "x.txt"), "utf8")).toBe("mine, untracked\n");
+      expect(existsSync(join(repo.dir, ".git", "rebase-merge"))).toBe(false);
+    });
+  });
+
+  // Review #7: `git status` follows this setting, so untracked files looked clean.
+  test("status.showUntrackedFiles=no does not hide an untracked file from the isolation", async () => {
+    await withRepo(async (repo) => {
+      repo.git(["config", "status.showUntrackedFiles", "no"]);
+      repo.commit("work", { "a.txt": "a" });
+      repo.writeFile("forgot-to-add.txt", "untracked\n");
+
+      let visible: boolean | null = null;
+      const h = makeDeps(repo.dir, {
+        testPlan: fakeTestPlan,
+        duringTests: () => {
+          visible = existsSync(join(repo.dir, "forgot-to-add.txt"));
+        },
+      });
+      await runPush(h.deps, options());
+
+      expect(visible as boolean | null).toBe(false);
+      expect(existsSync(join(repo.dir, "forgot-to-add.txt"))).toBe(true);
+    });
+  });
+
+  test("a suite that finds no tests (pytest exit 5) does not block the push", async () => {
+    await withRepo(async (repo) => {
+      const sha = repo.commit("work", { "a.txt": "a" });
+      const h = makeDeps(repo.dir, {
+        testPlan: { ...fakeTestPlan, noTestsExitCode: 5 },
+        testExitCode: 5,
+      });
+
+      const result = await runPush(h.deps, options());
+
+      expect(result.pushed).toBe(true);
+      expect(remoteSha(repo)).toBe(sha);
+      expect(h.ui.text()).toContain("found no tests");
+    });
+  });
+
+  test("refuses when a revert is in progress", async () => {
+    await withRepo(async (repo) => {
+      const first = repo.commit("edit", { "README.md": "one\n" });
+      repo.commit("edit again", { "README.md": "two\n" });
+      expect(repo.git(["revert", "--no-edit", first]).exitCode).not.toBe(0);
+
+      const h = makeDeps(repo.dir);
+      const error = await runPush(h.deps, options()).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(UserFacingError);
+      expect((error as UserFacingError).message).toContain("revert is already in progress");
+      repo.git(["revert", "--abort"]);
+    });
+  });
+
+  // The cache used to be checked against the tree from before the rebase.
+  test("a dry run that would rebase does not claim the suite will be skipped", async () => {
+    await withRepo(async (repo) => {
+      publishFeature(repo);
+      repo.advanceRemote("main", "teammate");
+      const cache = createMemoryTestCache();
+      cache.record(repo.git(["rev-parse", "HEAD^{tree}"]).stdout, fakeTestPlan);
+
+      const h = makeDeps(repo.dir, { testPlan: fakeTestPlan, testCache: cache });
+      await runPush(h.deps, options({ syncPolicy: "rebase", dryRun: true }));
+
+      expect(h.ui.text()).toContain("on the rebased commit");
+      expect(h.ui.text()).not.toContain("would be skipped");
+      expect(h.ui.text()).toContain("--force-with-lease=refs/heads/feature:");
     });
   });
 });

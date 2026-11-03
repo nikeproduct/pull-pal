@@ -60,14 +60,37 @@ exit 0
 `;
 }
 
-/** Did pull-pal write this hook? */
-export function isOurHook(content: string): boolean {
-  return content.includes(HOOK_MARKER);
+/**
+ * The hook pull-pal 0.1.x wrote. It has no marker and calls pull-pal off PATH
+ * (the GUI-client "command not found" bug), so `setup` must recognise it to
+ * replace it. Only this exact file counts: a user's own hook that happens to
+ * contain the same line is theirs.
+ */
+export const LEGACY_HOOK = '#!/bin/sh\npull-pal --hook-mode "$@"\n';
+
+function normalize(content: string): string {
+  return content.replace(/\r\n/g, "\n").trimEnd();
 }
 
-/** Version of a pull-pal-written hook, or null when unrecognised. */
+export function isLegacyHook(content: string): boolean {
+  return normalize(content) === normalize(LEGACY_HOOK);
+}
+
+const VERSION_PATTERN = /^# pull-pal hook v(\d+) — managed by pull-pal/m;
+
+/** Did pull-pal write this hook? */
+export function isOurHook(content: string): boolean {
+  return VERSION_PATTERN.test(content) || isLegacyHook(content);
+}
+
+/** Version of a pull-pal-written hook (0 for the 0.1 hook), or null when unrecognised. */
 export function hookVersionOf(content: string): number | null {
-  const match = content.match(/# pull-pal hook v(\d+)/);
-  const version = match?.[1];
+  if (isLegacyHook(content)) return 0;
+  const version = content.match(VERSION_PATTERN)?.[1];
   return version ? Number.parseInt(version, 10) : null;
+}
+
+/** True when `content` is exactly the hook `setup` would write for `argv`. */
+export function hookMatches(content: string, argv: string[]): boolean {
+  return normalize(content) === normalize(renderHook(argv));
 }

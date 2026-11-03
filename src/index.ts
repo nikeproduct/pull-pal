@@ -21,10 +21,10 @@ import { type WorkflowDeps, runPush } from "./core/workflow";
 import { createFsView, detectTestRunner } from "./detect/index";
 import { isInternalInvocation } from "./git/actions";
 import { createGitRunner } from "./git/exec";
-import { gitPath } from "./git/queries";
+import { gitPath, readGitConfig } from "./git/queries";
 import { describeHookState, installHook, readHookState, removeHook } from "./hooks/install";
 import { FIRST_RUN_NOTICE, createTelemetry } from "./telemetry/index";
-import { defaultConfigDir, setOptOut } from "./telemetry/state";
+import { defaultConfigDir, setOptOut, statePath } from "./telemetry/state";
 import { createFileTestCache, createMemoryTestCache } from "./test-cache";
 import { isRunnable, runTests } from "./testing";
 import { VERSION } from "./version";
@@ -90,7 +90,11 @@ async function main(argv: string[]): Promise<number> {
     if (command.mode === "on" || command.mode === "off") {
       const updated = setOptOut(dir, command.mode === "off");
       if (!updated) {
-        ui.fail("Could not write the analytics preference.");
+        ui.fail("Could not save the analytics preference — nothing was changed.");
+        ui.detail(
+          `Check that ${statePath(dir)} is writable by you (not owned by root after a sudo run).`,
+        );
+        if (command.mode === "off") ui.detail("Or opt out without the file: export DO_NOT_TRACK=1");
         return EXIT.preflight;
       }
       ui.ok(
@@ -116,7 +120,8 @@ async function main(argv: string[]): Promise<number> {
   const cwd = process.cwd();
   const root = repoRoot(cwd);
   const git = createGitRunner(root);
-  const config = loadConfig(git);
+  const config = loadConfig(readGitConfig(git));
+  const runnable = (command: string) => isRunnable(command, root);
   const detect = () =>
     detectTestRunner(
       { fs: createFsView(root), platform: process.platform },
@@ -131,7 +136,7 @@ async function main(argv: string[]): Promise<number> {
           git,
           config,
           detect,
-          isRunnable,
+          isRunnable: runnable,
           hookStatus: describeHookState(readHookState(git)),
         })}\n`,
       );
@@ -149,7 +154,7 @@ async function main(argv: string[]): Promise<number> {
       }
       ui.ok(result.message);
       ui.detail("Every git push in this repo will now be checked before it leaves.");
-      ui.detail("When a rebase is needed the push is blocked — run pull-pal to do it.");
+      ui.detail("A push that no longer merges with its base, or fails tests, is blocked.");
       await telemetry.flush({ command: "setup", exit_code: EXIT.ok });
       return EXIT.ok;
     }
@@ -174,7 +179,7 @@ async function main(argv: string[]): Promise<number> {
         git,
         ui,
         detectTests: detect,
-        isRunnable,
+        isRunnable: runnable,
         // Hook mode must never inherit stdin: that is where git's ref list lives.
         runTests: (plan) => runTests(plan, { cwd: root, inheritStdin: !opts.hookMode }),
         testCache: cacheFile ? createFileTestCache(cacheFile) : createMemoryTestCache(),

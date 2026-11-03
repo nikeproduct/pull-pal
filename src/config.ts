@@ -11,7 +11,7 @@
 
 import { DEFAULT_LONG_LIVED } from "./core/plan";
 import type { ConflictMode, SyncPolicy } from "./core/types";
-import type { GitRunner } from "./git/exec";
+import type { GitConfig } from "./git/queries";
 
 export interface PullPalConfig {
   syncPolicy: SyncPolicy;
@@ -47,14 +47,9 @@ export function parseConflictMode(value: string | null): ConflictMode {
   return value?.toLowerCase() === "warn" ? "warn" : DEFAULT_CONFIG.onConflict;
 }
 
-function readKey(git: GitRunner, key: string): string | null {
-  const r = git.capture(["config", "--get", key]);
-  return r.exitCode === 0 && r.stdout.trim() !== "" ? r.stdout.trim() : null;
-}
-
-function readAll(git: GitRunner, key: string): string[] {
-  const r = git.capture(["config", "--get-all", key]);
-  return r.exitCode === 0 ? r.stdout.split(/\r?\n/) : [];
+function readKey(config: GitConfig, key: string): string | null {
+  const value = config.get(key)?.trim();
+  return value ? value : null;
 }
 
 export function parseSyncPolicy(value: string | null): SyncPolicy {
@@ -102,14 +97,14 @@ export function parseBool(value: string | null, fallback: boolean): boolean {
   }
 }
 
-export function loadConfig(git: GitRunner): PullPalConfig {
+export function loadConfig(config: GitConfig): PullPalConfig {
   return {
-    syncPolicy: parseSyncPolicy(readKey(git, CONFIG_KEYS.sync)),
-    onConflict: parseConflictMode(readKey(git, CONFIG_KEYS.onConflict)),
-    testsEnabled: parseBool(readKey(git, CONFIG_KEYS.tests), DEFAULT_CONFIG.testsEnabled),
-    testCommand: readKey(git, CONFIG_KEYS.testCommand),
-    testCache: parseBool(readKey(git, CONFIG_KEYS.testCache), DEFAULT_CONFIG.testCache),
-    longLived: parseLongLived(readAll(git, CONFIG_KEYS.longLived)),
+    syncPolicy: parseSyncPolicy(readKey(config, CONFIG_KEYS.sync)),
+    onConflict: parseConflictMode(readKey(config, CONFIG_KEYS.onConflict)),
+    testsEnabled: parseBool(readKey(config, CONFIG_KEYS.tests), DEFAULT_CONFIG.testsEnabled),
+    testCommand: readKey(config, CONFIG_KEYS.testCommand),
+    testCache: parseBool(readKey(config, CONFIG_KEYS.testCache), DEFAULT_CONFIG.testCache),
+    longLived: parseLongLived(config.getAll(CONFIG_KEYS.longLived)),
   };
 }
 

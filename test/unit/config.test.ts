@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_CONFIG,
   colorEnabled,
+  loadConfig,
   parseBool,
   parseConflictMode,
   parseLongLived,
   parseSyncPolicy,
 } from "../../src/config";
+import { configFromEntries } from "../../src/git/queries";
 
 describe("parseSyncPolicy", () => {
   test.each([
@@ -89,5 +91,51 @@ describe("colorEnabled", () => {
 
   test("FORCE_COLOR enables colour when not piped", () => {
     expect(colorEnabled({ FORCE_COLOR: "1" })).toBe(true);
+  });
+});
+
+describe("loadConfig", () => {
+  test("reads every key from one git config snapshot", () => {
+    const config = loadConfig(
+      configFromEntries([
+        ["pullpal.sync", "rebase"],
+        ["pullpal.onconflict", "warn"],
+        ["pullpal.tests", "off"],
+        ["pullpal.testcommand", "make check"],
+        ["pullpal.testcache", "false"],
+        ["pullpal.longlived", "main"],
+        ["pullpal.longlived", "release/*"],
+      ]),
+    );
+    expect(config).toEqual({
+      syncPolicy: "rebase",
+      onConflict: "warn",
+      testsEnabled: false,
+      testCommand: "make check",
+      testCache: false,
+      longLived: ["main", "release/*"],
+    });
+  });
+
+  test("nothing set means the defaults", () => {
+    expect(loadConfig(configFromEntries([]))).toEqual(DEFAULT_CONFIG);
+  });
+});
+
+describe("git config snapshot", () => {
+  // `git config --list` lowercases section and key, but keeps the subsection.
+  test("section and key are case-insensitive; the branch name is not", () => {
+    const config = configFromEntries([["branch.Feature-X.pushremote", "fork"]]);
+    expect(config.get("branch.Feature-X.pushRemote")).toBe("fork");
+    expect(config.get("branch.feature-x.pushRemote")).toBeNull();
+  });
+
+  test("the last value wins, and every value is kept", () => {
+    const config = configFromEntries([
+      ["remote.pushdefault", "origin"],
+      ["remote.pushdefault", "fork"],
+    ]);
+    expect(config.get("remote.pushDefault")).toBe("fork");
+    expect(config.getAll("remote.pushDefault")).toEqual(["origin", "fork"]);
   });
 });

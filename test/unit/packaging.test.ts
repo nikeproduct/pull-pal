@@ -11,18 +11,19 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PLATFORMS as SHIPPED, npmPackageName } from "../../scripts/platforms";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 const readJson = <T>(rel: string): T => JSON.parse(read(rel)) as T;
 
-const PLATFORMS = [
-  { dir: "darwin-arm64", pkg: "@nikeproduct/pull-pal-darwin-arm64", bin: "pull-pal", os: "darwin" },
-  { dir: "darwin-x64", pkg: "@nikeproduct/pull-pal-darwin-x64", bin: "pull-pal", os: "darwin" },
-  { dir: "linux-x64", pkg: "@nikeproduct/pull-pal-linux-x64", bin: "pull-pal", os: "linux" },
-  { dir: "linux-arm64", pkg: "@nikeproduct/pull-pal-linux-arm64", bin: "pull-pal", os: "linux" },
-  { dir: "win32-x64", pkg: "@nikeproduct/pull-pal-win32-x64", bin: "pull-pal.exe", os: "win32" },
-] as const;
+// scripts/platforms.ts is the one list; everything below is checked against it.
+const PLATFORMS = SHIPPED.map((p) => ({
+  dir: p.key,
+  pkg: npmPackageName(p),
+  bin: p.bin,
+  os: p.key.slice(0, p.key.indexOf("-")),
+}));
 
 interface PackageJson {
   name?: string;
@@ -87,23 +88,32 @@ describe("npm packaging", () => {
     });
   }
 
-  test("the build compiles, and publishing ships, every platform package", () => {
-    const build = read("scripts/build.ts");
-    const publish = read("scripts/publish-npm.ts");
+  test.each(["scripts/build.ts", "scripts/publish-npm.ts", "scripts/set-version.ts"])(
+    "%s takes its platforms from the shared list",
+    (file) => {
+      expect(read(file)).toContain('import { PLATFORMS } from "./platforms"');
+    },
+  );
+
+  test("every platform has a package directory, and its binary is never committed", () => {
     for (const { dir } of PLATFORMS) {
-      expect(build).toContain(`pkgDir: "${dir}"`);
-      expect(publish).toContain(`"${dir}"`);
-      // The compiled binary is generated, never committed.
-      expect(read(".gitignore")).toContain(`npm-packages/${dir}/`);
+      expect(readJson<PackageJson>(`npm-packages/${dir}/package.json`).name).toBeDefined();
     }
+    const ignore = read(".gitignore");
+    expect(ignore).toContain("npm-packages/*/pull-pal\n");
+    expect(ignore).toContain("npm-packages/*/pull-pal.exe\n");
   });
 
-  test.each(["npm/run.js", "npm/install.js"])("%s knows every platform package", (file) => {
-    const source = read(file);
-    for (const { pkg } of PLATFORMS) {
-      expect(source).toContain(pkg);
-    }
-  });
+  // The launcher cannot import scripts/, so it reads the same list from the
+  // optionalDependencies that ship beside it — checked against PLATFORMS above.
+  test.each(["npm/run.js", "npm/install.js"])(
+    "%s derives its platforms from package.json",
+    (file) => {
+      const source = read(file);
+      expect(source).toContain('require("./package.json").optionalDependencies');
+      expect(source).toContain("`@nikeproduct/pull-pal-${platform}-${arch}`");
+    },
+  );
 
   test("the launcher resolves the right binary name per platform", () => {
     const source = read("npm/run.js");

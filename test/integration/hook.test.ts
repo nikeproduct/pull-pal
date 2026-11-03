@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EXIT } from "../../src/core/errors";
+import { HOOK_VERSION, LEGACY_HOOK, renderHook } from "../../src/hooks/template";
 import { withRepo } from "../helpers/fixture";
 import type { Fixture } from "../helpers/fixture";
 
@@ -385,6 +386,112 @@ describe("setup and remove-hook", () => {
       const after = await repo.runPullPal(["doctor"]);
       expect(after.stdout).toContain("pre-push");
       expect(after.stdout).toContain("installed (v2)");
+    });
+  });
+});
+
+describe("review fixes under real git push", () => {
+  /** A feature branch whose README conflicts with main. */
+  function conflicting(repo: Fixture) {
+    repo.git(["config", "pullpal.tests", "off"]);
+    onFeatureBranch(repo, { "README.md": "feature version\n" });
+    repo.advanceRemote("main", "teammate", { "README.md": "main version\n" });
+    repo.commit("mine", { "mine.txt": "mine" });
+  }
+
+  // Review #5: git hands the hook "HEAD" as the local ref for this push.
+  test("git push origin HEAD still gets the conflict check", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      conflicting(repo);
+      const remoteBefore = remoteSha(repo, "feature");
+
+      const push = repo.git(["push", "origin", "HEAD"]);
+
+      expect(push.exitCode).not.toBe(0);
+      expect(push.stderr).toContain("Push blocked");
+      expect(remoteSha(repo, "feature")).toBe(remoteBefore);
+    });
+  });
+
+  // Review #5: a tag travelling with the branch used to switch the check off.
+  test("--follow-tags still gets the conflict check", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      conflicting(repo);
+      repo.git(["tag", "-a", "v1", "-m", "v1", "HEAD~1"]);
+
+      const push = repo.git(["push", "--follow-tags", "origin", "feature"]);
+
+      expect(push.exitCode).not.toBe(0);
+      expect(push.stderr).toContain("Push blocked");
+    });
+  });
+
+  // Review #4: the hook's fetch used to move origin/feature to the teammate's
+  // commit, so a retried `git push --force-with-lease` went through.
+  test("the hook never moves refs/remotes, so a retried lease still protects", async () => {
+    await withRepo(async (repo) => {
+      await install(repo);
+      repo.git(["config", "pullpal.tests", "off"]);
+      onFeatureBranch(repo);
+      const tracked = repo.sha("origin/feature");
+      const teammate = repo.advanceRemote("feature", "teammate on my branch");
+      repo.git(["commit", "-q", "--amend", "-m", "feature work, amended"]);
+
+      const first = repo.git(["push", "--force-with-lease", "origin", "feature"]);
+      const retry = repo.git(["push", "--force-with-lease", "origin", "feature"]);
+
+      expect(first.exitCode).not.toBe(0);
+      expect(retry.exitCode).not.toBe(0);
+      expect(remoteSha(repo, "feature")).toBe(teammate);
+      expect(repo.sha("origin/feature")).toBe(tracked);
+    });
+  });
+});
+
+describe("upgrading and repairing the hook", () => {
+  const hookPath = (repo: Fixture) => join(repo.dir, ".git", "hooks", "pre-push");
+
+  // Review #3: every 0.1.x user has this exact file.
+  test("setup replaces the 0.1 hook, and remove-hook removes it", async () => {
+    await withRepo(async (repo) => {
+      repo.writeFile(".git/hooks/pre-push", LEGACY_HOOK);
+
+      const doctor = await repo.runPullPal(["doctor"]);
+      expect(doctor.stdout).toContain("installed by pull-pal 0.1");
+
+      const setup = await repo.runPullPal(["setup"]);
+      expect(setup.exitCode).toBe(EXIT.ok);
+      expect(setup.stderr).toContain("updated");
+      expect(readFileSync(hookPath(repo), "utf8")).toContain(`pull-pal hook v${HOOK_VERSION}`);
+
+      repo.writeFile(".git/hooks/pre-push", LEGACY_HOOK.replace(/\n/g, "\r\n"));
+      const removed = await repo.runPullPal(["remove-hook"]);
+      expect(removed.exitCode).toBe(EXIT.ok);
+      expect(existsSync(hookPath(repo))).toBe(false);
+    });
+  });
+
+  // Review #10: a Homebrew upgrade moves the binary; the hook then falls back
+  // to PATH, which GUI clients lack. setup used to call it "up to date".
+  test("setup rewrites a current-version hook whose binary has moved", async () => {
+    await withRepo(async (repo) => {
+      repo.writeFile(
+        ".git/hooks/pre-push",
+        renderHook(["/opt/homebrew/Cellar/pull-pal/0.1.9/bin/pull-pal"]),
+      );
+
+      const doctor = await repo.runPullPal(["doctor"]);
+      expect(doctor.stdout).toContain("moved or been upgraded");
+
+      const setup = await repo.runPullPal(["setup"]);
+      expect(setup.exitCode).toBe(EXIT.ok);
+      expect(setup.stderr).toContain("updated");
+      expect(readFileSync(hookPath(repo), "utf8")).not.toContain("0.1.9");
+
+      const again = await repo.runPullPal(["setup"]);
+      expect(again.stderr).toContain("already installed");
     });
   });
 });

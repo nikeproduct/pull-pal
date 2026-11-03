@@ -102,20 +102,52 @@ export function pushPositionals(gitArgs: string[]): string[] {
   return positionals;
 }
 
+/** The value of `--repo`, given as `--repo=<x>` or `--repo <x>`. */
+function repoFlag(gitArgs: string[]): string | null {
+  for (let i = 0; i < gitArgs.length; i++) {
+    const arg = gitArgs[i] as string;
+    if (arg === "--") return null;
+    if (arg === "--repo") return gitArgs[i + 1] ?? null;
+    if (arg.startsWith("--repo=")) return arg.slice("--repo=".length);
+  }
+  return null;
+}
+
+/** The parts of `git config` that decide where a push goes. */
+export interface RemotePreferences {
+  /** `branch.<name>.pushRemote` */
+  pushRemote?: string | null;
+  /** `remote.pushDefault` */
+  pushDefault?: string | null;
+  /** `branch.<name>.remote` */
+  upstreamRemote?: string | null;
+}
+
 /**
- * Which remote this push targets (defect: v0.1 hardcoded "origin" everywhere).
- * Priority: explicit positional arg → the branch's upstream remote → the only
- * remote → "origin" → whatever exists.
+ * Which remote this push targets, in git's own order (defect: v0.1 hardcoded
+ * "origin" everywhere): the repository argument → `--repo` →
+ * `branch.<name>.pushRemote` → `remote.pushDefault` → `branch.<name>.remote` →
+ * the only remote → "origin" → whatever exists.
+ *
+ * Getting this right matters beyond the push itself: the fetch, the comparison,
+ * the divergence guard, and `--set-upstream` all follow it.
  */
 export function resolveRemote(
   gitArgs: string[],
   remotes: string[],
-  upstreamRemote: string | null,
+  prefs: RemotePreferences = {},
 ): string {
-  for (const arg of pushPositionals(gitArgs)) {
-    if (remotes.includes(arg)) return arg;
+  const [repository] = pushPositionals(gitArgs);
+  const candidates = [
+    repository,
+    repoFlag(gitArgs),
+    prefs.pushRemote,
+    prefs.pushDefault,
+    prefs.upstreamRemote,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && remotes.includes(candidate)) return candidate;
   }
-  if (upstreamRemote && remotes.includes(upstreamRemote)) return upstreamRemote;
   if (remotes.length === 1 && remotes[0]) return remotes[0];
   if (remotes.includes("origin")) return "origin";
   return remotes[0] ?? "origin";
@@ -123,14 +155,29 @@ export function resolveRemote(
 
 /** True when the user supplied any force flag themselves — we then never add ours. */
 export function userPassedForce(gitArgs: string[]): boolean {
-  return gitArgs.some(
-    (a) =>
-      a === "--force" ||
-      a === "-f" ||
-      a === "--force-with-lease" ||
-      a.startsWith("--force-with-lease=") ||
-      a === "--force-if-includes" ||
-      a.startsWith("--force-if-includes="),
+  return (
+    gitArgs.some(
+      (a) =>
+        a === "--force" ||
+        a === "-f" ||
+        a === "--force-with-lease" ||
+        a.startsWith("--force-with-lease=") ||
+        a === "--force-if-includes" ||
+        a.startsWith("--force-if-includes="),
+    ) || pushPositionals(gitArgs).some((a) => a.startsWith("+"))
+  );
+}
+
+/**
+ * True when the user has taken responsibility for overwriting the remote branch:
+ * an outright force, or a lease that names the exact value they expect it to
+ * hold. A bare `--force-with-lease` is neither — it trusts a remote-tracking ref
+ * the user may not have looked at — so it leaves the divergence guard on.
+ */
+export function userOverridesGuard(gitArgs: string[]): boolean {
+  return (
+    gitArgs.some((a) => a === "--force" || a === "-f" || /^--force-with-lease=[^:]*:/.test(a)) ||
+    pushPositionals(gitArgs).some((a) => a.startsWith("+"))
   );
 }
 
@@ -199,18 +246,36 @@ export interface PushedRef {
   commit: string | null;
 }
 
+const isTag = (ref: string) => ref.startsWith("refs/tags/");
+
 /**
  * What a hook-mode push sends, from the ref lines git hands the hook. Deletions
  * must already be filtered out — they carry no commit to check.
+ *
+ * Tags are set aside: `--follow-tags` sends them alongside the branch, and a tag
+ * is a label on history, not new code to check. `destBranch` is the remote
+ * branch a plain push updates, which differs from `branch` when the upstream has
+ * another name.
  */
-export function scopeOfRefs(refs: PushedRef[], branch: string, headCommit: string): PushScope {
-  const description = refs.map((r) => shortBranch(r.localRef)).join(" ");
-  const testsHead = refs.every((r) => r.commit === headCommit);
+export function scopeOfRefs(
+  refs: PushedRef[],
+  branch: string,
+  headCommit: string,
+  destBranch: string = branch,
+): PushScope {
+  const branches = refs.filter((r) => !isTag(r.localRef) && !isTag(r.remoteRef));
+  if (branches.length === 0) {
+    const description = refs.map((r) => shortBranch(r.localRef)).join(" ") || "nothing";
+    return { testsHead: false, syncsHead: false, description };
+  }
+
+  const description = branches.map((r) => shortBranch(r.localRef)).join(" ");
+  const testsHead = branches.every((r) => r.commit === headCommit);
+  const fromHead = (local: string) => local === "HEAD" || local === `refs/heads/${branch}`;
+  const toOwnBranch = (remote: string) =>
+    remote === `refs/heads/${branch}` || remote === `refs/heads/${destBranch}`;
   const syncsHead =
-    testsHead &&
-    refs.every(
-      (r) => r.localRef === `refs/heads/${branch}` && r.remoteRef === `refs/heads/${branch}`,
-    );
+    testsHead && branches.every((r) => fromHead(r.localRef) && toOwnBranch(r.remoteRef));
   return { testsHead, syncsHead, description };
 }
 
@@ -317,6 +382,15 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * How to bring the branch up to date with `label` ("origin/main"). pull-pal's
+ * fetch leaves the user's remote-tracking refs alone, so the advice fetches too.
+ */
+export function pullCommand(remote: string, label: string, mode: "rebase" | "merge"): string {
+  const branch = label.startsWith(`${remote}/`) ? label.slice(remote.length + 1) : label;
+  return `git pull ${mode === "rebase" ? "--rebase" : "--no-rebase"} ${remote} ${branch}`;
+}
+
 function listFiles(files: string[]): string {
   const shown = files.slice(0, 5).join(", ");
   return files.length > 5 ? `${shown}, and ${files.length - 5} more` : shown;
@@ -355,8 +429,11 @@ export function decideSync(input: SyncInput): SyncDecision {
 
   if (conflicts && conflicts.length > 0) {
     const reason = `${plural(conflicts.length, "file")} conflict with ${ref}: ${listFiles(conflicts)}`;
+    const rebase = pullCommand(sync.remote, ref, "rebase");
     const fix =
-      ref === sync.upstream ? "git pull --rebase" : `git rebase ${ref}  (or: git merge ${ref})`;
+      ref === sync.upstream
+        ? rebase
+        : `${rebase}  (or, to merge: ${pullCommand(sync.remote, ref, "merge")})`;
     if (onConflict === "warn") return none(behindText, { warning: `${reason}.` });
     return none(behindText, {
       block: {
@@ -372,7 +449,7 @@ export function decideSync(input: SyncInput): SyncDecision {
       // Nothing of ours to push: git will just say "Everything up-to-date".
       if (sync.aheadUpstream === 0) return none(behindText);
       return none(behindText, {
-        warning: `${ref} has commits you do not have — git will reject the push until you integrate them (git pull --rebase).`,
+        warning: `${ref} has commits you do not have — git will reject the push until you integrate them (${pullCommand(sync.remote, ref, "rebase")}).`,
       });
     }
     if (conflicts === null) {
@@ -390,8 +467,9 @@ export function decideSync(input: SyncInput): SyncDecision {
   //
   // Scope: only the case where *we* would force-push. A rebase rewrites history,
   // so pull-pal adds --force-with-lease — and if the upstream holds commits we
-  // never saw, that push destroys them. The lease does not save us here, because
-  // this run just fetched and refreshed the very ref the lease compares against.
+  // never incorporated, that push destroys them. The lease does not save us
+  // here: it is pinned to what this run just fetched, so it only catches commits
+  // that land after the fetch.
   //
   // Deliberately NOT blocked: an ordinary push while merely behind. Git rejects
   // that itself, clearly and safely; duplicating the check would only make
@@ -402,7 +480,7 @@ export function decideSync(input: SyncInput): SyncDecision {
     result.block = {
       kind: "diverged",
       reason: `${sync.upstream} has ${plural(behindUpstream, "commit")} you do not have — the force-push after rebasing would destroy them.`,
-      hint: "Integrate them first (git pull --rebase), or re-run with --force-with-lease if you are certain you want to replace the remote branch.",
+      hint: `Integrate them first (${pullCommand(sync.remote, sync.upstream, "rebase")}), or re-run with --force if you are certain you want to replace the remote branch.`,
     };
   }
 
@@ -418,6 +496,11 @@ export interface PushPlanInput {
   gitArgs: string[];
   didRebase: boolean;
   /**
+   * What the lease pins after a rebase: the remote branch the push updates, and
+   * the commit pull-pal last saw there (null = it did not exist).
+   */
+  lease?: { branch: string; expect: string | null } | null;
+  /**
    * Set when the branch has no upstream yet and the user passed no refspec —
    * we publish it with -u so a first push works like every other push.
    */
@@ -428,15 +511,17 @@ export interface PushPlanInput {
  * Build the final `git push` argv.
  *
  * A rebase rewrites history, so the push needs force — but never bare `--force`.
- * `--force-with-lease` compares the remote against our remote-tracking ref, which
- * rejects the push if anyone landed a commit between our fetch and now.
+ * The lease names the exact commit pull-pal fetched and checked, so the push is
+ * rejected if anyone landed a commit between that fetch and now. (A bare lease
+ * would compare against `refs/remotes/*`, which pull-pal deliberately does not
+ * update — see SYNC_NAMESPACE.)
  *
  * The other half of that safety story lives in `decideSync`: the lease cannot
  * protect commits we fetched but did not incorporate, so those are blocked
  * outright before we ever get here.
  */
 export function planPush(input: PushPlanInput): PushPlan {
-  const { gitArgs, didRebase, setUpstream } = input;
+  const { gitArgs, didRebase, setUpstream, lease } = input;
 
   let args = gitArgs;
   if (setUpstream && pushPositionals(gitArgs).length === 0) {
@@ -452,5 +537,8 @@ export function planPush(input: PushPlanInput): PushPlan {
   if (!didRebase || userPassedForce(gitArgs)) {
     return { args, forceLeaseAdded: false };
   }
-  return { args: ["--force-with-lease", ...args], forceLeaseAdded: true };
+  const flag = lease
+    ? `--force-with-lease=refs/heads/${lease.branch}:${lease.expect ?? ""}`
+    : "--force-with-lease";
+  return { args: [flag, ...args], forceLeaseAdded: true };
 }

@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { allDeletions, isDeletion, parsePushRefs } from "../../src/core/gate";
 import {
   HOOK_VERSION,
+  LEGACY_HOOK,
+  hookMatches,
   hookVersionOf,
   isOurHook,
   renderHook,
@@ -57,6 +59,44 @@ describe("hook template", () => {
   test("a foreign hook is not mistaken for ours", () => {
     expect(isOurHook("#!/bin/sh\nnpm run lint\n")).toBe(false);
     expect(hookVersionOf("#!/bin/sh\nnpm run lint\n")).toBeNull();
+  });
+
+  test("a hook that merely mentions pull-pal hook is not ours", () => {
+    expect(isOurHook("#!/bin/sh\n# runs the pull-pal hook, then lint\nnpm run lint\n")).toBe(false);
+  });
+
+  // Every 0.1.x user has this file; without recognising it, setup and
+  // remove-hook both refused and the PATH-dependent hook stayed forever.
+  describe("the 0.1 hook", () => {
+    test("is ours, as version 0", () => {
+      expect(isOurHook(LEGACY_HOOK)).toBe(true);
+      expect(hookVersionOf(LEGACY_HOOK)).toBe(0);
+    });
+
+    test("whatever its line endings", () => {
+      expect(isOurHook(LEGACY_HOOK.replace(/\n/g, "\r\n"))).toBe(true);
+    });
+
+    test("but a user's own hook containing the same line is theirs", () => {
+      const composite = `${LEGACY_HOOK}npm run lint\n`;
+      expect(isOurHook(composite)).toBe(false);
+    });
+  });
+
+  describe("hookMatches", () => {
+    test("is true for exactly what setup would write", () => {
+      expect(hookMatches(hook, ["/usr/local/bin/pull-pal"])).toBe(true);
+    });
+
+    // A Homebrew upgrade moves the Cellar path; the old hook then falls back to
+    // PATH, which GUI clients lack — so setup must notice and rewrite it.
+    test("is false once the binary has moved", () => {
+      expect(hookMatches(hook, ["/opt/homebrew/Cellar/pull-pal/0.2.1/bin/pull-pal"])).toBe(false);
+    });
+
+    test("ignores line-ending differences", () => {
+      expect(hookMatches(hook.replace(/\n/g, "\r\n"), ["/usr/local/bin/pull-pal"])).toBe(true);
+    });
   });
 });
 

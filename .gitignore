@@ -2,11 +2,8 @@ node_modules/
 dist/
 coverage/
 npm/bin/
-npm-packages/darwin-arm64/pull-pal
-npm-packages/darwin-x64/pull-pal
-npm-packages/linux-x64/pull-pal
-npm-packages/linux-arm64/pull-pal
-npm-packages/win32-x64/pull-pal.exe
+npm-packages/*/pull-pal
+npm-packages/*/pull-pal.exe
 *.js.map
 .DS_Store
 

@@ -9,22 +9,17 @@ const os = require("os");
 const platform = os.platform();
 const arch = os.arch();
 
-const PLATFORM_PACKAGES = {
-  "darwin-arm64": "@nikeproduct/pull-pal-darwin-arm64",
-  "darwin-x64":   "@nikeproduct/pull-pal-darwin-x64",
-  "linux-x64":    "@nikeproduct/pull-pal-linux-x64",
-  "linux-arm64":  "@nikeproduct/pull-pal-linux-arm64",
-  "win32-x64":    "@nikeproduct/pull-pal-win32-x64",
-};
+// One platform package per optionalDependency, named @nikeproduct/pull-pal-<platform>-<arch>.
+const PACKAGES = Object.keys(require("./package.json").optionalDependencies || {});
 
 function getBinaryPath() {
-  const key = `${platform}-${arch}`;
-  const pkgName = PLATFORM_PACKAGES[key];
+  const pkgName = `@nikeproduct/pull-pal-${platform}-${arch}`;
 
-  if (!pkgName) {
+  if (!PACKAGES.includes(pkgName)) {
+    const supported = PACKAGES.map((p) => p.replace("@nikeproduct/pull-pal-", ""));
     throw new Error(
       `[pull-pal] Unsupported platform: ${platform}/${arch}\n` +
-      `[pull-pal] Supported: ${Object.keys(PLATFORM_PACKAGES).join(", ")}`
+      `[pull-pal] Supported: ${supported.join(", ")}`
     );
   }
 
@@ -57,10 +52,22 @@ if (platform !== "win32") {
   }
 }
 
+// Ctrl+C reaches pull-pal directly (same process group). It may need a moment
+// after that — to put back changes it set aside while tests ran — so this
+// launcher must not exit first and hand the terminal back mid-restore.
+process.on("SIGINT", () => {});
+
 const result = spawnSync(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   shell: false,
   env: { ...process.env, PULLPAL_INSTALL_SOURCE: "npm" },
 });
 
+if (result.error) {
+  console.error(`[pull-pal] Could not run ${binaryPath}: ${result.error.message}`);
+  process.exit(1);
+}
+if (result.signal) {
+  process.exit(128 + (os.constants.signals[result.signal] || 1));
+}
 process.exit(result.status ?? 1);

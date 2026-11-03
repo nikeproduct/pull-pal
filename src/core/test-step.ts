@@ -11,7 +11,7 @@ import * as actions from "../git/actions";
 import * as queries from "../git/queries";
 import { EXIT, UserFacingError } from "./errors";
 import type { TestPlan } from "./types";
-import type { WorkflowDeps } from "./workflow";
+import type { Reporter, WorkflowDeps } from "./workflow";
 
 export type TestStepResult =
   /** No test runner detected. */
@@ -21,6 +21,8 @@ export type TestStepResult =
   /** This tree already passed with this command. */
   | { kind: "cached"; plan: TestPlan }
   | { kind: "passed"; plan: TestPlan }
+  /** Ran, but the runner reported that it found no tests (pytest's exit 5). */
+  | { kind: "empty"; plan: TestPlan }
   | { kind: "failed"; plan: TestPlan; code: number };
 
 export interface TestStepOptions {
@@ -99,8 +101,69 @@ export async function runTestStep(
     ui.info("Restored your uncommitted changes");
   }
 
+  if (plan.noTestsExitCode !== undefined && code === plan.noTestsExitCode) {
+    return { kind: "empty", plan };
+  }
   if (code !== 0) return { kind: "failed", plan, code };
   // Only a run that saw exactly HEAD's tree vouches for that tree.
   if (isolated && tree) deps.testCache.record(tree, plan);
   return { kind: "passed", plan };
+}
+
+export interface TestSummary {
+  /**
+   * Which detector found the suite (e.g. "node:script:test"), for telemetry.
+   * Never the command itself: a configured command can hold paths and secrets.
+   */
+  runner: string | null;
+  /** null when no suite ran. */
+  passed: boolean | null;
+  /** The suite's exit code, when it failed. */
+  failedCode: number | null;
+}
+
+/**
+ * Report a test step the same way for `pull-pal` and for the hook. The hook is
+ * quieter about a project with no tests: every `git push` would repeat it.
+ */
+export function reportTestStep(ui: Reporter, result: TestStepResult, inHook: boolean): TestSummary {
+  const summary = (passed: boolean | null, failedCode: number | null = null): TestSummary => ({
+    runner: "plan" in result ? result.plan.source : null,
+    passed,
+    failedCode,
+  });
+
+  switch (result.kind) {
+    case "none":
+      if (!inHook) {
+        ui.warn("No test runner detected — skipping tests.");
+        ui.detail('Set one explicitly: git config pullpal.testCommand "<command>"');
+      }
+      return summary(null);
+    case "missing":
+      ui.warn(
+        `Detected ${result.plan.label}, but "${result.plan.command}" is not on PATH — skipping tests.`,
+      );
+      return summary(null);
+    case "empty":
+      ui.warn(`${result.plan.label} found no tests to run — continuing.`);
+      return summary(null);
+    case "failed":
+      if (result.code === EXIT.interrupted) {
+        ui.fail(
+          inHook
+            ? "Tests interrupted — push cancelled."
+            : "Tests interrupted — nothing was pushed.",
+        );
+      } else {
+        ui.fail("Tests failed — push blocked.");
+      }
+      if (inHook) ui.detail("To push anyway, bypass the hook: git push --no-verify");
+      return summary(false, result.code);
+    case "passed":
+      ui.ok("Tests passed");
+      return summary(true);
+    case "cached":
+      return summary(true);
+  }
 }

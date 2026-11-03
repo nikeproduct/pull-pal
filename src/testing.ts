@@ -5,8 +5,24 @@
  * and the effect ("run it") stays trivial.
  */
 
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { EXIT } from "./core/errors";
 import type { TestPlan } from "./core/types";
+
+/** A command that lives in the repository (`./gradlew`), not on PATH. */
+function isRepoRelative(command: string): boolean {
+  return command.startsWith("./") || command.startsWith(".\\");
+}
+
+/**
+ * The path to spawn. Repo-relative commands are made absolute against the repo
+ * root: PATH lookup never searches the working directory for them, and on
+ * Windows a bare `gradlew.bat` is not found at all.
+ */
+export function resolveCommand(command: string, root: string): string {
+  return isRepoRelative(command) ? resolve(root, command) : command;
+}
 
 /**
  * Is this command actually invocable?
@@ -15,7 +31,8 @@ import type { TestPlan } from "./core/types";
  * pytest produces a warning and a skipped step, not an ENOENT crash that blocks
  * the push.
  */
-export function isRunnable(command: string): boolean {
+export function isRunnable(command: string, root: string = process.cwd()): boolean {
+  if (isRepoRelative(command)) return existsSync(resolveCommand(command, root));
   return Bun.which(command) !== null;
 }
 
@@ -37,11 +54,15 @@ export interface RunTestsOptions {
  * restore runs once the suite has exited.
  */
 export async function runTests(plan: TestPlan, opts: RunTestsOptions = {}): Promise<number> {
-  const proc = Bun.spawn([plan.command, ...plan.args], {
-    cwd: opts.cwd ?? process.cwd(),
+  const cwd = opts.cwd ?? process.cwd();
+  const proc = Bun.spawn([resolveCommand(plan.command, cwd), ...plan.args], {
+    cwd,
     stdout: "inherit",
     stderr: "inherit",
     stdin: opts.inheritStdin ? "inherit" : "ignore",
+    // cmd.exe has its own quoting rules; the usual argv escaping mangles a
+    // configured command's quotes. shellPlan quotes it the way cmd /s expects.
+    windowsVerbatimArguments: plan.shell === true && process.platform === "win32",
   });
 
   let interrupted = false;

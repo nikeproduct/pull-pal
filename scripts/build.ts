@@ -17,6 +17,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PLATFORMS } from "./platforms";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "dist");
@@ -24,60 +25,22 @@ const TARBALLS = join(DIST, "tarballs");
 const STAGING = join(DIST, ".staging");
 const SRC = join(ROOT, "src", "index.ts");
 
-/** The name the binary must have *inside* an archive or npm package. */
+/** The name the binary must have inside a Homebrew tarball. */
 const POSIX_BIN = "pull-pal";
-const WINDOWS_BIN = "pull-pal.exe";
 
-interface Target {
+/** What each platform build produces, from the shared list in scripts/platforms.ts. */
+const TARGETS = PLATFORMS.map((p) => ({
   /** bun --target value */
-  target: string;
+  target: p.bunTarget,
   /** Output filename in dist/ */
-  out: string;
+  out: p.asset,
   /** npm-packages/ subdirectory */
-  pkgDir: string;
+  pkgDir: p.key,
   /** Name the binary takes inside the npm package */
-  pkgBin: string;
+  pkgBin: p.bin,
   /** Whether to produce a Homebrew tarball */
-  tarball: boolean;
-}
-
-const TARGETS: Target[] = [
-  {
-    target: "bun-darwin-arm64",
-    out: "pull-pal-darwin-arm64",
-    pkgDir: "darwin-arm64",
-    pkgBin: POSIX_BIN,
-    tarball: true,
-  },
-  {
-    target: "bun-darwin-x64",
-    out: "pull-pal-darwin-x64",
-    pkgDir: "darwin-x64",
-    pkgBin: POSIX_BIN,
-    tarball: true,
-  },
-  {
-    target: "bun-linux-x64",
-    out: "pull-pal-linux-x64",
-    pkgDir: "linux-x64",
-    pkgBin: POSIX_BIN,
-    tarball: false,
-  },
-  {
-    target: "bun-linux-arm64",
-    out: "pull-pal-linux-arm64",
-    pkgDir: "linux-arm64",
-    pkgBin: POSIX_BIN,
-    tarball: false,
-  },
-  {
-    target: "bun-windows-x64",
-    out: "pull-pal-windows-x64.exe",
-    pkgDir: "win32-x64",
-    pkgBin: WINDOWS_BIN,
-    tarball: false,
-  },
-];
+  tarball: p.tarball,
+}));
 
 function run(cmd: string[], cwd = ROOT): { ok: boolean; stderr: string } {
   const r = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });

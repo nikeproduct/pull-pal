@@ -9,7 +9,7 @@
  * Everything here is plain data so `core/plan.ts` can stay a pure function of it.
  */
 
-export type OperationInProgress = "rebase" | "merge" | "cherry-pick" | "bisect";
+export type OperationInProgress = "rebase" | "merge" | "cherry-pick" | "revert" | "bisect";
 
 export interface BaseState {
   isRepo: boolean;
@@ -41,7 +41,11 @@ export interface SyncState {
    * is not the default branch (a stacked PR, a branch off `develop`).
    */
   configuredBase: string | null;
-  /** Full upstream ref of the current branch (e.g. "origin/feature"), if set. */
+  /**
+   * The remote branch this push updates (e.g. "origin/feature"), when it exists
+   * on the remote. Usually the branch's upstream; in a fork workflow, the branch
+   * on the push remote.
+   */
   upstream: string | null;
   /** Commits on HEAD not on upstream. null = no upstream / not computable. */
   aheadUpstream: number | null;
@@ -128,6 +132,11 @@ export interface TestPlan {
    * are free-form strings ("make check && ./verify.sh") rather than argv.
    */
   shell?: boolean;
+  /**
+   * An exit code meaning "ran, but found no tests" — pytest's 5. Not a failure:
+   * a project that has no tests yet should not be blocked from pushing.
+   */
+  noTestsExitCode?: number;
 }
 
 /** Resolved run options — flags merged over config merged over defaults. */

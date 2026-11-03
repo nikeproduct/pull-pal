@@ -12,16 +12,27 @@ import * as queries from "../git/queries";
 import type { TestCache } from "../test-cache";
 import { EXIT, UserFacingError } from "./errors";
 import {
+  type RemotePreferences,
   chooseTarget,
   decideSync,
   planPush,
   preflight,
+  pullCommand,
   resolveRemote,
   scopeOfPush,
-  userPassedForce,
+  userOverridesGuard,
 } from "./plan";
-import { runTestStep } from "./test-step";
-import type { RunOptions, SyncDecision, SyncTarget, TestPlan } from "./types";
+import { reportTestStep, runTestStep } from "./test-step";
+import type {
+  BaseState,
+  ConflictMode,
+  RunOptions,
+  SyncDecision,
+  SyncPolicy,
+  SyncState,
+  SyncTarget,
+  TestPlan,
+} from "./types";
 
 /** Output port — the terminal implementation lives in cli/ui.ts. */
 export interface Reporter {
@@ -41,7 +52,7 @@ export interface WorkflowDeps {
   ui: Reporter;
   /** Detect the project's test command, or null when there is none. */
   detectTests(): TestPlan | null;
-  /** Is this command actually present on PATH? Missing tools warn, never crash. */
+  /** Is this command actually present (on PATH, or in the repo for `./x`)? */
   isRunnable(command: string): boolean;
   /** Run the suite with the user's terminal attached; resolves to its exit code. */
   runTests(plan: TestPlan): Promise<number>;
@@ -54,6 +65,7 @@ export interface WorkflowOutcome {
   rebased: boolean;
   pushed: boolean;
   testsPassed: boolean | null;
+  /** The detector that found the suite — never the command (it can hold secrets). */
   testRunner: string | null;
   /** Set when a gate stopped the run; the string is the machine-readable reason. */
   blocked: string | null;
@@ -84,6 +96,69 @@ function assertWorkable(deps: WorkflowDeps) {
   return base;
 }
 
+/** The git config that decides where a push from `branch` goes. */
+export function remotePreferences(config: queries.GitConfig, branch: string): RemotePreferences {
+  return {
+    pushRemote: config.get(`branch.${branch}.pushRemote`),
+    pushDefault: config.get("remote.pushDefault"),
+    upstreamRemote: queries.upstreamRemoteOf(config, branch),
+  };
+}
+
+export interface SyncAssessmentInput {
+  base: BaseState;
+  branch: string;
+  remote: string;
+  config: queries.GitConfig;
+  policy: SyncPolicy;
+  onConflict: ConflictMode;
+  longLived: readonly string[];
+  /** false = nothing was fetched; there is nothing to compare. */
+  online: boolean;
+  /** Shown as the reason when not online. */
+  offlineReason?: string;
+  /** The user has taken responsibility for overwriting the remote branch. */
+  forced: boolean;
+}
+
+export interface SyncAssessment {
+  sync: SyncState;
+  target: SyncTarget;
+  decision: SyncDecision;
+}
+
+/**
+ * State → target → comparison → decision, after any fetch. Shared by the push
+ * pipeline and the hook, which differ only in what they do with the decision.
+ */
+export function assessSync(git: GitRunner, input: SyncAssessmentInput): SyncAssessment {
+  const { base, branch, remote, config, policy } = input;
+  const sync = input.online
+    ? queries.readSyncState(git, config, remote, branch)
+    : queries.readOfflineSyncState(remote);
+  const target = chooseTarget({
+    branch,
+    sync,
+    policy,
+    enabled: input.online,
+    disabledReason: input.offlineReason,
+    longLived: input.longLived,
+  });
+  const comparison = target.ref
+    ? queries.compareWith(git, queries.syncRefForLabel(remote, target.ref))
+    : null;
+  const decision = decideSync({
+    base,
+    sync,
+    target,
+    comparison,
+    policy,
+    forced: input.forced,
+    onConflict: input.onConflict,
+  });
+  return { sync, target, decision };
+}
+
 function reportSync(ui: Reporter, decision: SyncDecision): void {
   if (decision.warning) ui.warn(decision.warning);
   if (decision.action === "none" && !decision.warning) ui.ok(decision.reason);
@@ -95,12 +170,13 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   // ── Preflight ────────────────────────────────────────────────────────────
   const base = assertWorkable(deps);
   const branch = base.branch as string; // preflight rules out detached/unborn
-  const upstreamRemote = queries.readUpstreamRemote(git, branch);
-  const remote = resolveRemote(opts.gitArgs, base.remotes, upstreamRemote);
+  const config = queries.readGitConfig(git);
+  const remote = resolveRemote(opts.gitArgs, base.remotes, remotePreferences(config, branch));
+  const dest = queries.pushDestination(config, remote, branch);
   const scope = scopeOfPush({
     gitArgs: opts.gitArgs,
     branch,
-    upstream: queries.readUpstream(git),
+    upstream: `${remote}/${dest}`,
     remote,
   });
 
@@ -118,7 +194,9 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   }
 
   // ── Fetch ────────────────────────────────────────────────────────────────
-  if (syncing) {
+  // pullpal.sync=off compares nothing, so it has nothing to fetch.
+  const fetching = syncing && opts.syncPolicy !== "off";
+  if (fetching) {
     ui.step(`Fetching ${remote}...`);
     const fetched = actions.fetch(git, remote);
     if (!fetched.ok) {
@@ -130,28 +208,26 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     ui.ok("Fetched");
   } else if (!opts.sync) {
     ui.info("Skipping fetch and sync (--no-sync)");
+  } else if (syncing) {
+    ui.info("Sync disabled (pullpal.sync=off) — not fetching");
   }
 
   // ── Sync decision ────────────────────────────────────────────────────────
-  const syncState = syncing
-    ? queries.readSyncState(git, remote, branch)
-    : queries.readOfflineSyncState(git, remote);
-  const target = chooseTarget({
-    branch,
-    sync: syncState,
-    policy: opts.syncPolicy,
-    enabled: syncing,
-    disabledReason: opts.sync ? "not syncing a push of another branch" : undefined,
-    longLived: opts.longLived,
-  });
-  const decision = decideSync({
+  const { target, decision } = assessSync(git, {
     base,
-    sync: syncState,
-    target,
-    comparison: target.ref ? queries.compareWith(git, target.ref) : null,
+    branch,
+    remote,
+    config,
     policy: opts.syncPolicy,
-    forced: userPassedForce(opts.gitArgs),
     onConflict: opts.onConflict,
+    longLived: opts.longLived,
+    online: fetching,
+    offlineReason: !opts.sync
+      ? "sync skipped (--no-sync)"
+      : !scope.syncsHead
+        ? "not syncing a push of another branch"
+        : "sync disabled (pullpal.sync=off)",
+    forced: userOverridesGuard(opts.gitArgs),
   });
 
   if (decision.block) {
@@ -167,11 +243,20 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   }
 
   // The branch is published on its first push, so the plan must say so.
-  const setUpstream = !syncState.upstream && scope.syncsHead ? { remote, branch } : null;
+  const setUpstream =
+    !queries.hasUpstream(config, branch) && scope.syncsHead ? { remote, branch } : null;
 
   // ── Dry run stops here, after everything has been decided ────────────────
   if (opts.dryRun) {
-    printDryRun(deps, opts, { decision, target, remote, setUpstream, testsHead: scope.testsHead });
+    const lease = { branch: dest, expect: queries.revParse(git, queries.syncRef(remote, dest)) };
+    printDryRun(deps, opts, {
+      decision,
+      target,
+      remote,
+      setUpstream,
+      lease,
+      testsHead: scope.testsHead,
+    });
     return outcome({ exitCode: EXIT.ok });
   }
 
@@ -180,11 +265,15 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
   if (decision.action === "rebase" && decision.onto) {
     if (decision.warning) ui.warn(decision.warning);
     ui.step(`Rebasing onto ${decision.onto} (${decision.reason})...`);
-    const result = actions.rebase(git, decision.onto);
+    const result = actions.rebase(git, queries.syncRefForLabel(remote, decision.onto));
     if (!result.ok) {
-      const hint = result.aborted
-        ? `The rebase was rolled back — your branch is exactly as it was.\nIntegrate manually with: git rebase ${decision.onto}`
-        : "The repository is mid-rebase. Resolve the conflicts, then run: git rebase --continue";
+      const manual = `Integrate manually with: ${pullCommand(remote, decision.onto, "rebase")}`;
+      const hint =
+        result.state === "not-started"
+          ? `The rebase could not start — your branch is exactly as it was.\n${manual}`
+          : result.state === "aborted"
+            ? `The rebase was rolled back — your branch is exactly as it was.\n${manual}`
+            : "The repository is mid-rebase. Resolve the conflicts, then run: git rebase --continue";
       throw new UserFacingError(`Could not rebase onto ${decision.onto}.`, {
         hint: `${result.message}\n${hint}`,
         exitCode: EXIT.preflight,
@@ -192,7 +281,7 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     }
     rebased = true;
     ui.ok(`Rebased onto ${decision.onto}`);
-  } else if (syncing) {
+  } else if (fetching) {
     reportSync(ui, decision);
   }
 
@@ -202,38 +291,17 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
 
   if (opts.tests && scope.testsHead) {
     const result = await runTestStep(deps, { useCache: opts.useTestCache });
-    testRunner = "plan" in result ? result.plan.label : null;
-
-    switch (result.kind) {
-      case "none":
-        ui.warn("No test runner detected — skipping tests.");
-        ui.detail('Set one explicitly: git config pullpal.testCommand "<command>"');
-        break;
-      case "missing":
-        ui.warn(
-          `Detected ${result.plan.label}, but "${result.plan.command}" is not on PATH — skipping tests.`,
-        );
-        break;
-      case "failed":
-        ui.fail(
-          result.code === EXIT.interrupted
-            ? "Tests interrupted — nothing was pushed."
-            : "Tests failed — push blocked.",
-        );
-        return outcome({
-          exitCode: result.code,
-          rebased,
-          testsPassed: false,
-          testRunner,
-          blocked: "tests-failed",
-        });
-      case "passed":
-        ui.ok("Tests passed");
-        testsPassed = true;
-        break;
-      case "cached":
-        testsPassed = true;
-        break;
+    const summary = reportTestStep(ui, result, false);
+    testsPassed = summary.passed;
+    testRunner = summary.runner;
+    if (summary.failedCode !== null) {
+      return outcome({
+        exitCode: summary.failedCode,
+        rebased,
+        testsPassed: false,
+        testRunner,
+        blocked: "tests-failed",
+      });
     }
   }
 
@@ -242,6 +310,8 @@ export async function runPush(deps: WorkflowDeps, opts: RunOptions): Promise<Wor
     gitArgs: opts.gitArgs,
     didRebase: rebased,
     setUpstream,
+    // Pinned to what this run fetched and checked, not to refs/remotes/*.
+    lease: { branch: dest, expect: queries.revParse(git, queries.syncRef(remote, dest)) },
   });
 
   if (pushPlan.forceLeaseAdded) {
@@ -270,6 +340,7 @@ interface DryRunPlan {
   target: SyncTarget;
   remote: string;
   setUpstream: { remote: string; branch: string } | null;
+  lease: { branch: string; expect: string | null };
   testsHead: boolean;
 }
 
@@ -279,16 +350,18 @@ function describeSync(decision: SyncDecision, target: SyncTarget): string {
   return `compare with ${target.ref} — ${decision.reason}`;
 }
 
-function describeTests(deps: WorkflowDeps, opts: RunOptions, testsHead: boolean): string {
+function describeTests(deps: WorkflowDeps, opts: RunOptions, plan: DryRunPlan): string {
   if (!opts.tests) return "skipped (--no-tests)";
-  if (!testsHead) return "skipped (not the checked-out branch)";
-  const plan = deps.detectTests();
-  if (!plan) return "none detected";
-  const label = `${plan.label} [${plan.source}]`;
-  if (!plan.shell && !deps.isRunnable(plan.command))
+  if (!plan.testsHead) return "skipped (not the checked-out branch)";
+  const tests = deps.detectTests();
+  if (!tests) return "none detected";
+  const label = `${tests.label} [${tests.source}]`;
+  if (!tests.shell && !deps.isRunnable(tests.command))
     return `${label} — not on PATH, would be skipped`;
+  // After a rebase the tree is a new one, so today's cache says nothing about it.
+  if (plan.decision.action === "rebase") return `${label} — on the rebased commit`;
   const tree = queries.readHeadTree(deps.git);
-  if (opts.useTestCache && tree && deps.testCache.has(tree, plan)) {
+  if (opts.useTestCache && tree && deps.testCache.has(tree, tests)) {
     return `${label} — already passed for this commit, would be skipped`;
   }
   return label;
@@ -300,12 +373,13 @@ function printDryRun(deps: WorkflowDeps, opts: RunOptions, plan: DryRunPlan): vo
   ui.info("Dry run — nothing will be changed.");
   ui.info(`  remote:  ${plan.remote}`);
   ui.info(`  sync:    ${describeSync(plan.decision, plan.target)}`);
-  ui.info(`  tests:   ${describeTests(deps, opts, plan.testsHead)}`);
+  ui.info(`  tests:   ${describeTests(deps, opts, plan)}`);
 
   const pushPlan = planPush({
     gitArgs: opts.gitArgs,
     didRebase: plan.decision.action === "rebase",
     setUpstream: plan.setUpstream,
+    lease: plan.lease,
   });
   ui.info(`  push:    git push ${pushPlan.args.join(" ")}`.trimEnd());
 }

@@ -1,12 +1,14 @@
 /**
  * `pull-pal doctor` — answers "what would pull-pal do here, and why?" without
- * touching anything. Every value it prints is one the push pipeline actually
- * uses, so it doubles as the debugging tool for surprising behaviour.
+ * touching anything: no network, no ref updates. Every value it prints is
+ * resolved the way the push pipeline resolves it, so it doubles as the debugging
+ * tool for surprising behaviour.
  */
 
 import type { PullPalConfig } from "../config";
-import { chooseTarget } from "../core/plan";
+import { chooseTarget, resolveRemote } from "../core/plan";
 import type { TestPlan } from "../core/types";
+import { remotePreferences } from "../core/workflow";
 import type { GitRunner } from "../git/exec";
 import * as queries from "../git/queries";
 
@@ -47,17 +49,31 @@ export function renderDoctor(input: DoctorInput): string {
   const upstream = queries.readUpstream(git);
   out.push(line("upstream", upstream ?? "none (would be set on first push)"));
 
-  const remote = base.remotes.includes("origin") ? "origin" : (base.remotes[0] ?? "origin");
-  const defaultBranch = base.remotes.length ? queries.resolveDefaultBranch(git, remote) : null;
-  out.push(line("default branch", defaultBranch ? `${remote}/${defaultBranch}` : "undetermined"));
+  const gitConfig = queries.readGitConfig(git);
+  const branch = base.branch;
+  const remote = resolveRemote(
+    [],
+    base.remotes,
+    branch ? remotePreferences(gitConfig, branch) : {},
+  );
+  out.push(line("pushes to", base.remotes.length ? remote : "no remote"));
+  const defaultBranch = base.remotes.length
+    ? queries.resolveDefaultBranch(git, remote, { offline: true })
+    : null;
+  out.push(
+    line(
+      "default branch",
+      defaultBranch ? `${remote}/${defaultBranch}` : "not known locally (resolved on first push)",
+    ),
+  );
 
   const target = chooseTarget({
-    branch: base.branch,
+    branch,
     sync: {
       remote,
       defaultBranch,
-      configuredBase: queries.readConfiguredBase(git, base.branch),
-      upstream,
+      configuredBase: queries.readConfiguredBase(gitConfig, branch),
+      upstream: branch ? `${remote}/${queries.pushDestination(gitConfig, remote, branch)}` : null,
       aheadUpstream: null,
       behindUpstream: null,
     },
@@ -72,8 +88,7 @@ export function renderDoctor(input: DoctorInput): string {
     ),
   );
 
-  const status = git.capture(["status", "--porcelain"]);
-  const changed = status.exitCode === 0 && status.stdout.length > 0;
+  const changed = Boolean(queries.readChanges(git));
   out.push(
     line("working tree", changed ? "uncommitted changes (set aside while tests run)" : "clean"),
   );

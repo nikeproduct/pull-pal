@@ -23,17 +23,16 @@
 import * as actions from "../git/actions";
 import * as queries from "../git/queries";
 import { EXIT } from "./errors";
-import {
-  type PushedRef,
-  chooseTarget,
-  decideSync,
-  preflight,
-  resolveRemote,
-  scopeOfRefs,
-} from "./plan";
-import { runTestStep } from "./test-step";
+import { type PushedRef, preflight, resolveRemote, scopeOfRefs } from "./plan";
+import { reportTestStep, runTestStep } from "./test-step";
 import type { RunOptions } from "./types";
-import { type WorkflowDeps, type WorkflowOutcome, outcome } from "./workflow";
+import {
+  type WorkflowDeps,
+  type WorkflowOutcome,
+  assessSync,
+  outcome,
+  remotePreferences,
+} from "./workflow";
 
 /** One line of the ref list git feeds the hook on stdin. */
 export interface PushRef {
@@ -88,20 +87,24 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
     return outcome();
   }
   const branch = base.branch as string;
+  const config = queries.readGitConfig(git);
+  // Git hands the hook the remote's name as its first argument, so a push to a
+  // second remote is checked against that remote, not the branch's upstream.
+  const remote = resolveRemote(opts.gitArgs, base.remotes, remotePreferences(config, branch));
 
   // ── What is git pushing? ─────────────────────────────────────────────────
   // Run by hand (no ref list), the gate checks the current branch.
-  const head = queries.peelToCommit(git, "HEAD") ?? "";
+  const head = queries.revParse(git, "HEAD") ?? "";
   const pushed: PushedRef[] = opts.refs
     .filter((r) => !isDeletion(r))
     .map((r) => ({
       localRef: r.localRef,
       remoteRef: r.remoteRef,
-      commit: queries.peelToCommit(git, r.localSha),
+      commit: queries.revParse(git, r.localSha),
     }));
   const scope =
     pushed.length > 0
-      ? scopeOfRefs(pushed, branch, head)
+      ? scopeOfRefs(pushed, branch, head, queries.pushDestination(config, remote, branch))
       : { testsHead: true, syncsHead: true, description: branch };
 
   if (!scope.testsHead) {
@@ -112,34 +115,26 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
   }
 
   // ── Sync check ───────────────────────────────────────────────────────────
-  if (opts.sync && scope.syncsHead) {
-    // Git hands the hook the remote's name as its first argument, so a push to a
-    // second remote is checked against that remote, not the branch's upstream.
-    const upstreamRemote = queries.readUpstreamRemote(git, branch);
-    const remote = resolveRemote(opts.gitArgs, base.remotes, upstreamRemote);
-
+  if (opts.sync && scope.syncsHead && opts.syncPolicy !== "off") {
+    // Into pull-pal's own refs: git captured this push's lease before running
+    // the hook, but a retry would compare against whatever refs/remotes/* hold
+    // by then — so the hook must never be what moves them.
     const fetched = actions.fetch(git, remote);
     if (!fetched.ok) {
       ui.warn(`pull-pal could not fetch ${remote} — skipping the sync check.`);
     } else {
-      const sync = queries.readSyncState(git, remote, branch);
-      const target = chooseTarget({
-        branch,
-        sync,
-        policy: opts.syncPolicy,
-        enabled: true,
-        longLived: opts.longLived,
-      });
-      const decision = decideSync({
+      const { decision } = assessSync(git, {
         base,
-        sync,
-        target,
-        comparison: target.ref ? queries.compareWith(git, target.ref) : null,
+        branch,
+        remote,
+        config,
         policy: opts.syncPolicy,
+        onConflict: opts.onConflict,
+        longLived: opts.longLived,
+        online: true,
         // The divergence guard protects pull-pal's own force-push. The hook
         // never pushes, so it never applies here.
         forced: true,
-        onConflict: opts.onConflict,
       });
 
       if (decision.block?.kind === "conflicts") {
@@ -161,31 +156,14 @@ export async function runGate(deps: WorkflowDeps, opts: GateOptions): Promise<Wo
   if (!opts.tests) return outcome();
 
   const result = await runTestStep(deps, { useCache: opts.useTestCache });
-  switch (result.kind) {
-    case "none":
-      return outcome();
-    case "missing":
-      ui.warn(
-        `pull-pal detected ${result.plan.label}, but "${result.plan.command}" is not on PATH — skipping.`,
-      );
-      return outcome({ testRunner: result.plan.label });
-    case "failed":
-      ui.fail(
-        result.code === EXIT.interrupted
-          ? "Tests interrupted — push cancelled."
-          : "Tests failed — push blocked.",
-      );
-      ui.detail(BYPASS);
-      return outcome({
-        exitCode: result.code,
-        testsPassed: false,
-        testRunner: result.plan.label,
-        blocked: "tests-failed",
-      });
-    case "passed":
-      ui.ok("Tests passed");
-      return outcome({ testsPassed: true, testRunner: result.plan.label });
-    case "cached":
-      return outcome({ testsPassed: true, testRunner: result.plan.label });
+  const summary = reportTestStep(ui, result, true);
+  if (summary.failedCode !== null) {
+    return outcome({
+      exitCode: summary.failedCode,
+      testsPassed: false,
+      testRunner: summary.runner,
+      blocked: "tests-failed",
+    });
   }
+  return outcome({ testsPassed: summary.passed, testRunner: summary.runner });
 }

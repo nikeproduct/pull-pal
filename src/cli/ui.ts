@@ -37,9 +37,3 @@ export function createUi(opts: UiOptions = {}): Reporter {
     detail: (msg) => write(paint(CODES.dim, `  ${msg}`)),
   };
 }
-
-/** A reporter that discards everything — used by `--dry-run` machinery and tests. */
-export function silentUi(): Reporter {
-  const noop = () => {};
-  return { step: noop, ok: noop, warn: noop, fail: noop, info: noop, detail: noop };
-}

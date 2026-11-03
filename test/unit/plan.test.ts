@@ -10,6 +10,7 @@ import {
   resolveRemote,
   scopeOfPush,
   scopeOfRefs,
+  userOverridesGuard,
   userPassedForce,
 } from "../../src/core/plan";
 import type { SyncPolicy } from "../../src/core/types";
@@ -58,38 +59,72 @@ describe("preflight", () => {
 });
 
 describe("resolveRemote", () => {
+  const remotes = ["origin", "upstream", "fork"];
+
   test("prefers an explicit positional remote", () => {
-    expect(resolveRemote(["upstream", "my-branch"], ["origin", "upstream"], "origin")).toBe(
+    expect(resolveRemote(["upstream", "my-branch"], remotes, { upstreamRemote: "origin" })).toBe(
       "upstream",
     );
   });
 
   test("ignores positionals that are not remotes (e.g. a branch name)", () => {
-    expect(resolveRemote(["my-branch"], ["origin"], null)).toBe("origin");
+    expect(resolveRemote(["my-branch"], ["origin"])).toBe("origin");
   });
 
   test("ignores flags that happen to share a remote's name", () => {
-    expect(resolveRemote(["--origin"], ["origin", "upstream"], "upstream")).toBe("upstream");
+    expect(resolveRemote(["--origin"], remotes, { upstreamRemote: "upstream" })).toBe("upstream");
+  });
+
+  test.each([["--repo=upstream"], ["--repo upstream"]])("honours %s", (flag) => {
+    const args = flag.split(" ");
+    expect(resolveRemote(args, remotes, { pushRemote: "fork", upstreamRemote: "origin" })).toBe(
+      "upstream",
+    );
+  });
+
+  test("the repository argument beats --repo, as in git", () => {
+    expect(resolveRemote(["--repo=upstream", "fork"], remotes)).toBe("fork");
+  });
+
+  // Fork workflow: fetch from the organisation's repo, push to your own.
+  test("branch.<name>.pushRemote beats remote.pushDefault and the upstream remote", () => {
+    expect(
+      resolveRemote([], remotes, {
+        pushRemote: "fork",
+        pushDefault: "upstream",
+        upstreamRemote: "origin",
+      }),
+    ).toBe("fork");
+  });
+
+  test("remote.pushDefault beats the upstream remote", () => {
+    expect(resolveRemote([], remotes, { pushDefault: "fork", upstreamRemote: "origin" })).toBe(
+      "fork",
+    );
   });
 
   test("falls back to the branch's upstream remote", () => {
-    expect(resolveRemote([], ["origin", "fork"], "fork")).toBe("fork");
+    expect(resolveRemote([], ["origin", "fork"], { upstreamRemote: "fork" })).toBe("fork");
+  });
+
+  test("ignores a configured remote that does not exist", () => {
+    expect(resolveRemote([], ["origin", "fork"], { pushDefault: "gone" })).toBe("origin");
   });
 
   test("uses the only remote when there is exactly one", () => {
-    expect(resolveRemote([], ["fork"], null)).toBe("fork");
+    expect(resolveRemote([], ["fork"])).toBe("fork");
   });
 
   test("prefers origin when several remotes exist and nothing else decides", () => {
-    expect(resolveRemote([], ["alpha", "origin", "zeta"], null)).toBe("origin");
+    expect(resolveRemote([], ["alpha", "origin", "zeta"])).toBe("origin");
   });
 
   test("falls back to the first remote when origin is absent", () => {
-    expect(resolveRemote([], ["alpha", "zeta"], null)).toBe("alpha");
+    expect(resolveRemote([], ["alpha", "zeta"])).toBe("alpha");
   });
 
   test("defaults to origin when there are no remotes at all", () => {
-    expect(resolveRemote([], [], null)).toBe("origin");
+    expect(resolveRemote([], [])).toBe("origin");
   });
 });
 
@@ -111,6 +146,28 @@ describe("userPassedForce", () => {
   test("does not match unrelated flags that merely start with --force-ish text", () => {
     expect(userPassedForce(["--forceful"])).toBe(false);
   });
+
+  test("detects a +refspec", () => {
+    expect(userPassedForce(["origin", "+feature"])).toBe(true);
+  });
+});
+
+describe("userOverridesGuard", () => {
+  test.each([["--force"], ["-f"], ["--force-with-lease=feature:abc123"]])("%s does", (flag) => {
+    expect(userOverridesGuard([flag])).toBe(true);
+  });
+
+  test("so does a +refspec", () => {
+    expect(userOverridesGuard(["origin", "+HEAD:feature"])).toBe(true);
+  });
+
+  // A bare lease trusts refs/remotes/*, which the user may not have looked at.
+  test.each([["--force-with-lease"], ["--force-with-lease=feature"], ["--force-if-includes"]])(
+    "%s does not",
+    (flag) => {
+      expect(userOverridesGuard([flag])).toBe(false);
+    },
+  );
 });
 
 describe("pushPositionals", () => {
@@ -208,9 +265,43 @@ describe("scopeOfRefs", () => {
     });
   });
 
-  test("a tag on HEAD alongside the branch is tested, not synced", () => {
-    const tag = { localRef: "refs/tags/v1", remoteRef: "refs/tags/v1", commit: "abc" };
+  // --follow-tags: a tag travels with the branch, and may point at an older commit.
+  test("tags alongside the branch are set aside", () => {
+    const tag = { localRef: "refs/tags/v1", remoteRef: "refs/tags/v1", commit: "old" };
     expect(scopeOfRefs([ref("feature", "abc"), tag], "feature", "abc")).toMatchObject({
+      testsHead: true,
+      syncsHead: true,
+    });
+  });
+
+  test("a push of only tags checks nothing", () => {
+    const tag = { localRef: "refs/tags/v1", remoteRef: "refs/tags/v1", commit: "abc" };
+    expect(scopeOfRefs([tag], "feature", "abc")).toMatchObject({
+      testsHead: false,
+      syncsHead: false,
+    });
+  });
+
+  // `git push origin HEAD` hands the hook "HEAD" as the local ref.
+  test("HEAD as the local ref is the current branch", () => {
+    const head = { localRef: "HEAD", remoteRef: "refs/heads/feature", commit: "abc" };
+    expect(scopeOfRefs([head], "feature", "abc")).toMatchObject({
+      testsHead: true,
+      syncsHead: true,
+    });
+  });
+
+  test("an upstream branch with another name still syncs", () => {
+    const pushed = [ref("feature", "abc", "jo/feature")];
+    expect(scopeOfRefs(pushed, "feature", "abc", "jo/feature")).toMatchObject({
+      testsHead: true,
+      syncsHead: true,
+    });
+  });
+
+  test("HEAD pushed to an unrelated branch is tested, not synced", () => {
+    const head = { localRef: "HEAD", remoteRef: "refs/heads/other", commit: "abc" };
+    expect(scopeOfRefs([head], "feature", "abc")).toMatchObject({
       testsHead: true,
       syncsHead: false,
     });
@@ -361,7 +452,9 @@ describe("decideSync", () => {
       const d = decide({ behind: 2, conflicts: ["a.ts", "b.ts"] });
       expect(d.block?.kind).toBe("conflicts");
       expect(d.block?.reason).toContain("2 files conflict with origin/main: a.ts, b.ts");
-      expect(d.block?.hint).toContain("git rebase origin/main");
+      // pull-pal's fetch leaves origin/main alone, so the fix has to fetch too.
+      expect(d.block?.hint).toContain("git pull --rebase origin main");
+      expect(d.block?.hint).toContain("git pull --no-rebase origin main");
     });
 
     test("a long conflict list is summarised", () => {
@@ -434,7 +527,8 @@ describe("decideSync", () => {
       });
       expect(d.block?.kind).toBe("diverged");
       expect(d.block?.reason).toContain("origin/feature has 1 commit you do not have");
-      expect(d.block?.hint).toContain("git pull --rebase");
+      expect(d.block?.hint).toContain("git pull --rebase origin feature");
+      expect(d.block?.hint).toContain("--force");
     });
 
     test("does not block when the user forced deliberately", () => {
@@ -503,6 +597,38 @@ describe("planPush", () => {
     const p = planPush({ gitArgs: [], didRebase: true, setUpstream: null });
     expect(p.args).toEqual(["--force-with-lease"]);
     expect(p.forceLeaseAdded).toBe(true);
+  });
+
+  // pull-pal leaves refs/remotes/* alone, so a bare lease would compare against
+  // a ref it never refreshed. The lease names what pull-pal actually checked.
+  test("pins the lease to the commit pull-pal fetched", () => {
+    const p = planPush({
+      gitArgs: [],
+      didRebase: true,
+      setUpstream: null,
+      lease: { branch: "feature", expect: "abc123" },
+    });
+    expect(p.args).toEqual(["--force-with-lease=refs/heads/feature:abc123"]);
+  });
+
+  test("a branch not yet on the remote must still not exist when pushed", () => {
+    const p = planPush({
+      gitArgs: [],
+      didRebase: true,
+      setUpstream: null,
+      lease: { branch: "feature", expect: null },
+    });
+    expect(p.args).toEqual(["--force-with-lease=refs/heads/feature:"]);
+  });
+
+  test("no lease without a rebase", () => {
+    const p = planPush({
+      gitArgs: [],
+      didRebase: false,
+      setUpstream: null,
+      lease: { branch: "feature", expect: "abc123" },
+    });
+    expect(p.args).toEqual([]);
   });
 
   test("never adds a lease when the user already forced", () => {

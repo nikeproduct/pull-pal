@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestPlan } from "../../src/core/types";
+import { shellPlan } from "../../src/detect/index";
 import { createFileTestCache } from "../../src/test-cache";
-import { runTests } from "../../src/testing";
+import { isRunnable, runTests } from "../../src/testing";
 
 const plan: TestPlan = { command: "bun", args: ["test"], label: "bun test", source: "test" };
 const TREE = "a".repeat(40);
@@ -66,5 +67,34 @@ describe("runTests", () => {
     expect(await running).toBe(130);
     expect(Date.now() - started).toBeLessThan(10000);
     expect(process.listenerCount("SIGINT")).toBe(0);
+  });
+
+  // On Windows, cmd.exe does not understand the usual argv escaping, so a
+  // configured `npm test -- --grep "my suite"` arrived split in two.
+  test("quotes inside a configured command reach the program intact", async () => {
+    await withDir(async (dir) => {
+      const check = join(dir, "argv-check.js");
+      writeFileSync(
+        check,
+        'process.exit(process.argv[2] === "a b" && process.argv[3] === "c" ? 0 : 3);\n',
+      );
+      const command = `"${process.execPath}" "${check}" "a b" c`;
+      expect(await runTests(shellPlan(command, process.platform, "test"))).toBe(0);
+    });
+  });
+
+  // ./gradlew lives in the repo: resolved against the repo root, never PATH.
+  test("a repo-relative command runs from the repo root, wherever pull-pal started", async () => {
+    await withDir(async (dir) => {
+      const windows = process.platform === "win32";
+      const name = windows ? "wrapper.bat" : "wrapper";
+      writeFileSync(join(dir, name), windows ? "@exit /b 7\r\n" : "#!/bin/sh\nexit 7\n");
+      if (!windows) chmodSync(join(dir, name), 0o755);
+      const wrapper: TestPlan = { command: `./${name}`, args: [], label: name, source: "test" };
+
+      expect(isRunnable(wrapper.command, dir)).toBe(true);
+      expect(isRunnable("./missing-wrapper", dir)).toBe(false);
+      expect(await runTests(wrapper, { cwd: dir })).toBe(7);
+    });
   });
 });

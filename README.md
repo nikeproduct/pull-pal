@@ -12,6 +12,10 @@ It fetches, checks your branch against the default branch for conflicts, runs
 your test suite (auto-detected) against the commit being pushed, and pushes.
 It never rewrites your history unless you ask it to.
 
+pull-pal fetches into its own refs (`refs/pull-pal/*`) and never moves your
+remote-tracking branches, so `--force-with-lease` protects exactly what it
+would with plain `git push`.
+
 Works with any language. Nothing to configure.
 
 ---
@@ -152,12 +156,15 @@ incorporated, such as a teammate's push:
 ```
 ✗ origin/my-feature has 1 commit you do not have — the force-push after
   rebasing would destroy them.
-  Integrate them first (git pull --rebase), or re-run with --force-with-lease
-  if you are certain you want to replace the remote branch.
+  Integrate them first (git pull --rebase origin my-feature), or re-run with
+  --force if you are certain you want to replace the remote branch.
 ```
 
-`--force-with-lease` alone cannot catch this case, because pull-pal has just
-fetched the very ref the lease compares against.
+A lease alone cannot catch this case: pull-pal pins its lease to the commit it
+just fetched, which already includes the teammate's work. A bare
+`--force-with-lease` of your own does not switch the check off; `--force`, or a
+lease naming the exact commit you expect (`--force-with-lease=my-feature:<sha>`),
+does.
 
 pull-pal also refuses to start on a detached HEAD, mid-rebase, mid-merge, or in
 a repo with no remotes, and prints the command that fixes each one.
@@ -207,18 +214,20 @@ The first match wins:
 | `go.mod` | `go test ./...` |
 | `pytest.ini`, or pytest declared in `pyproject.toml` / `setup.cfg` / `tox.ini` | `pytest` |
 | `pom.xml` | `mvn -q test` |
-| `gradlew` (`gradlew.bat` on Windows) or `build.gradle` | wrapper, else `gradle test` |
+| `gradlew` (`gradlew.bat` on Windows) or `build.gradle` | `./gradlew test`, else `gradle test` |
 | `Makefile` with a `test` target | `make test` |
 | `Gemfile` + a `spec/` directory | `bundle exec rspec` |
-| `Gemfile` | `bundle exec rake test` |
+| `Gemfile` + a Rakefile with a `test` task (or a Rails app) | `bundle exec rake test` |
 
 The package manager is chosen from your project (the `packageManager` field,
 then lockfiles), not from whatever happens to be installed on your machine.
 
 Two things deliberately count as "no test runner": the placeholder `npm init`
 writes (`echo "Error: no test specified" && exit 1`), and a `pyproject.toml`
-that never mentions pytest. If nothing is detected, or the detected tool is not
-on your PATH, pull-pal warns and pushes anyway rather than blocking you.
+that never mentions pytest. Neither does a Gemfile on its own: Bundler is often
+there only for tools like fastlane or Jekyll. If nothing is detected, or the
+detected tool is not on your PATH, pull-pal warns and pushes anyway rather than
+blocking you. So does pytest when it finds no tests to run.
 
 A slow suite is the most common reason people bypass a pre-push check. If yours
 takes minutes, point pull-pal at a faster subset and leave the full run to CI:
@@ -253,7 +262,7 @@ git config branch.my-feature.pullpalBase develop    # what this branch is based 
   cleanly.
 - `upstream`: rebase onto your branch's own upstream when behind it (like
   `git pull --rebase`).
-- `off`: still fetch, but never compare or rebase.
+- `off`: never fetch, compare, or rebase.
 
 The **base branch** is the remote's default branch. If a branch is based on
 something else, such as a stacked PR or a branch cut from `develop`, set
@@ -262,6 +271,10 @@ something else, such as a stacked PR or a branch cut from `develop`, set
 `pullpal.longLived` replaces the built-in list (`main master trunk develop
 development dev staging production prod release/* releases/* release-*
 hotfix/*`). Set it to an empty string to treat no branch as long-lived.
+
+pull-pal pushes where `git push` would: the repository you name, then
+`--repo`, `branch.<name>.pushRemote`, `remote.pushDefault`, and the branch's
+upstream remote. It fetches and compares on that same remote.
 
 Command-line flags beat config; repo config beats global config.
 
@@ -275,7 +288,9 @@ source, and coarse command outcomes (did it rebase, did tests pass, did the push
 succeed).
 
 It never sends repository names, paths, remotes, branch names, commit messages,
-or code. The identifier is a random UUID generated on your machine.
+or code. A configured test command is never sent either, only which rule found
+it (for example `config:pullpal.testCommand`). The identifier is a random UUID
+generated on your machine.
 
 Opt out at any time:
 

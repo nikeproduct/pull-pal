@@ -8,18 +8,12 @@ const os = require("os");
 const platform = os.platform();
 const arch = os.arch();
 
-const PLATFORM_PACKAGES = {
-  "darwin-arm64": "@nikeproduct/pull-pal-darwin-arm64",
-  "darwin-x64":   "@nikeproduct/pull-pal-darwin-x64",
-  "linux-x64":    "@nikeproduct/pull-pal-linux-x64",
-  "linux-arm64":  "@nikeproduct/pull-pal-linux-arm64",
-  "win32-x64":    "@nikeproduct/pull-pal-win32-x64",
-};
+// One platform package per optionalDependency, named @nikeproduct/pull-pal-<platform>-<arch>.
+const PACKAGES = Object.keys(require("./package.json").optionalDependencies || {});
 
 try {
-  const key = `${platform}-${arch}`;
-  const pkgName = PLATFORM_PACKAGES[key];
-  if (!pkgName) {
+  const pkgName = `@nikeproduct/pull-pal-${platform}-${arch}`;
+  if (!PACKAGES.includes(pkgName)) {
     console.warn(`[pull-pal] Unsupported platform ${platform}/${arch} — skipping binary setup.`);
     process.exit(0);
   }

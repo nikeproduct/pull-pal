@@ -33,6 +33,12 @@ you ask it to, and several things that never worked now do.
   project's own `test` script (`bun run test`, `npm test`, …). Projects that
   relied on the old behaviour of running Bun's built-in test runner should set
   `git config pullpal.testCommand "bun test"`.
+- **A Gemfile alone no longer means `rake test`.** It needs a Rakefile with a
+  `test` task (or a Rails app). Repositories that use Bundler only for tools,
+  such as fastlane or Jekyll, were blocked on every push.
+- **pull-pal fetches into `refs/pull-pal/*` and no longer updates your
+  remote-tracking branches.** Advice that used to say `git rebase origin/main`
+  now says `git pull --rebase origin main`, which fetches too.
 
 ### Added
 
@@ -77,6 +83,48 @@ you ask it to, and several things that never worked now do.
 
 ### Fixed
 
+- **`--force-with-lease` protected nothing on a pull-pal push.** pull-pal
+  fetched first, which moved the remote-tracking ref a bare lease compares
+  against, so the lease always matched and a teammate's commit could be
+  overwritten. The pre-push hook's fetch did the same to a retried
+  `git push --force-with-lease`. pull-pal now fetches into its own refs, pins
+  its own lease to the commit it checked, and keeps the divergence guard on for
+  a bare lease.
+- **A configured test command could be sent in analytics.** The test runner
+  was reported by its full command, which can hold tokens, user names, and
+  paths. Analytics now reports only which rule found the command.
+- **0.1 hooks could not be upgraded or removed.** The hook 0.1 wrote had no
+  marker, so `setup` and `remove-hook` treated it as someone else's and left
+  it calling pull-pal off PATH. That exact file is now recognised and replaced.
+- **`setup` did not repair a hook after pull-pal moved.** A Homebrew upgrade,
+  an nvm switch, or a reinstall changes the binary path the hook embeds; `setup`
+  now rewrites any hook that differs from what it would write.
+- **The hook skipped its conflict check** for `git push origin HEAD`, for
+  `--follow-tags`, and when the upstream branch has a different name.
+- **Pushes went to the wrong remote in fork workflows.** pull-pal now follows
+  git's order: the repository argument, `--repo`, `branch.<name>.pushRemote`,
+  `remote.pushDefault`, then the upstream remote. A new branch is published,
+  fetched, and compared on that remote.
+- **`status.showUntrackedFiles=no` let untracked files into the tests**, and a
+  pass was then cached for the commit.
+- **`analytics off` could report success without saving.** It now reads the
+  setting back and fails if it did not persist.
+- **The Gradle wrapper never ran on Windows**, and on macOS and Linux it was
+  skipped when pull-pal ran from a subdirectory.
+- **Quotes in a configured test command were mangled on Windows**, so
+  `npm test -- --grep "my suite"` failed.
+- **A rebase that never started was reported as mid-rebase**, with advice to
+  run `git rebase --continue`, which failed.
+- pytest's "no tests collected" exit (5) no longer blocks a push.
+- A revert in progress is detected, like a merge or a rebase.
+- `doctor` no longer makes network calls or writes refs, and names the remote
+  a push would actually use.
+- `pull-pal --dry-run` no longer claims a rebased commit's tests are cached.
+- The npm launcher no longer exits on Ctrl+C while pull-pal is still restoring
+  changes it set aside.
+- `pullpal.sync=off` no longer fetches.
+- A manual release now verifies the tag it publishes, not the branch it was
+  started from.
 - **Pushing a branch other than the checked-out one borrowed its checks.**
   `pull-pal origin other-branch` used to rebase the *current* branch, run
   *its* tests, and then push `other-branch` with `--force-with-lease`. Because
@@ -140,13 +188,18 @@ you ask it to, and several things that never worked now do.
 - Analytics gained a `hook_gate_result` property, is documented in the README,
   and its privacy guarantees are enforced by tests rather than asserted in a
   comment.
+- Each push starts fewer git processes: configuration is read once, and
+  repository state in fewer calls.
+- The list of supported platforms lives in one place (`scripts/platforms.ts`).
 
 ### Testing
 
 From zero tests to a suite covering the decision matrix exhaustively, the whole
 detection table against in-memory fixtures, and the full pipeline against real
 git repositories with a local bare remote — including hook behaviour driven by
-actual `git push` invocations. CI runs on Linux, macOS, and Windows.
+actual `git push` invocations. CI runs on Linux, macOS, and Windows. Tests run
+with an empty global git config, so a developer's own settings (or a global
+`core.hooksPath`) can neither change results nor receive a test hook.
 
 ## [0.1.3] — 2026-06-13
 
