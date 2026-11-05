@@ -24,7 +24,6 @@ Works with any language. Nothing to configure.
 
 ```sh
 npm install -g pull-pal
-brew install nikeproduct/pull-pal/pull-pal
 ```
 
 Binaries for macOS (arm64, x64), Linux (x64, arm64), and Windows (x64) are
@@ -327,7 +326,7 @@ bun run test      # unit + real-git integration tests (the script sets the timeo
                   # integration tests need; bare `bun test` cuts them off at 5s)
 bun run typecheck
 bun run lint
-bun run build     # binaries, tarballs, checksums, npm packages
+bun run build     # binaries, checksums, npm packages
 ```
 
 The architecture keeps decisions pure and effects at the edges. `src/core/`

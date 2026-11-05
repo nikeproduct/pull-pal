@@ -14,8 +14,6 @@ export interface Platform {
   asset: string;
   /** The binary's name inside its npm package. */
   bin: "pull-pal" | "pull-pal.exe";
-  /** Also packaged as a Homebrew tarball. */
-  tarball: boolean;
 }
 
 export const NPM_SCOPE = "@nikeproduct";
@@ -30,34 +28,29 @@ export const PLATFORMS: readonly Platform[] = [
     bunTarget: "bun-darwin-arm64",
     asset: "pull-pal-darwin-arm64",
     bin: "pull-pal",
-    tarball: true,
   },
   {
     key: "darwin-x64",
     bunTarget: "bun-darwin-x64",
     asset: "pull-pal-darwin-x64",
     bin: "pull-pal",
-    tarball: true,
   },
   {
     key: "linux-x64",
     bunTarget: "bun-linux-x64",
     asset: "pull-pal-linux-x64",
     bin: "pull-pal",
-    tarball: false,
   },
   {
     key: "linux-arm64",
     bunTarget: "bun-linux-arm64",
     asset: "pull-pal-linux-arm64",
     bin: "pull-pal",
-    tarball: false,
   },
   {
     key: "win32-x64",
     bunTarget: "bun-windows-x64",
     asset: "pull-pal-windows-x64.exe",
     bin: "pull-pal.exe",
-    tarball: false,
   },
 ];

@@ -3,7 +3,7 @@
  * Single source of truth for pull-pal's version.
  *
  * The canonical version lives in the root package.json. Every other channel
- * manifest (npm shim, platform packages, Homebrew) is derived from it,
+ * manifest (npm shim, platform packages) is derived from it,
  * so they can never drift apart again.
  *
  * Usage:
@@ -43,7 +43,6 @@ const TARGETS: Target[] = [
     file: `npm-packages/${p.key}/package.json`,
     patterns: [/"version":\s*"([^"]+)"/],
   })),
-  { file: "Formula/pull-pal.rb", patterns: [/^  version "([^"]+)"/m] },
 ];
 
 function rootVersion(): string {
