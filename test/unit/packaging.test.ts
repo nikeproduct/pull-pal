@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PLATFORMS as SHIPPED, npmPackageName } from "../../scripts/platforms";
@@ -44,10 +44,6 @@ describe("version consistency", () => {
   test.each([
     ["npm/package.json", () => readJson<PackageJson>("npm/package.json").version],
     ["src/version.ts", () => read("src/version.ts").match(/VERSION = "([^"]+)"/)?.[1]],
-    [
-      "Formula/pull-pal.rb",
-      () => read("Formula/pull-pal.rb").match(/^ {2}version "([^"]+)"/m)?.[1],
-    ],
   ])("%s matches the root package.json", (_file, extract) => {
     expect(extract()).toBe(rootPkg.version);
   });
@@ -131,36 +127,27 @@ describe("npm packaging", () => {
   });
 });
 
-describe("homebrew formula", () => {
-  const formula = read("Formula/pull-pal.rb");
-
-  // The v0.1 formula installed "pull-pal" from a tarball whose only member was
-  // "pull-pal-darwin-arm64", so `brew install` failed for everyone.
-  test("installs the binary name the build actually puts in the tarball", () => {
-    expect(formula).toContain('bin.install "pull-pal"');
-    expect(read("scripts/build.ts")).toContain('const POSIX_BIN = "pull-pal"');
-  });
-
-  test("points at both macOS tarballs", () => {
-    expect(formula).toContain("pull-pal-darwin-arm64.tar.gz");
-    expect(formula).toContain("pull-pal-darwin-x64.tar.gz");
-  });
-
-  test("its checksums are placeholders that the release workflow must fill", () => {
-    const placeholders = formula.match(/REPLACED_ON_RELEASE/g) ?? [];
-    expect(placeholders).toHaveLength(2);
-    expect(read(".github/workflows/release.yml")).toContain("REPLACED_ON_RELEASE_DARWIN_ARM64");
-  });
-});
-
 describe("dropped channels", () => {
-  // pip was never published; it shipped a downloader for a binary npm and
-  // Homebrew already deliver. It can come back when someone asks for it.
+  // pip was never published; it shipped a downloader for a binary npm already
+  // delivers. It can come back when someone asks for it.
   test("nothing still builds, versions, or releases a pip package", () => {
     for (const file of ["scripts/build.ts", "scripts/set-version.ts", ".github/workflows/ci.yml"]) {
       expect(read(file)).not.toMatch(/python|pypi/i);
     }
     expect(read(".github/workflows/release.yml")).not.toContain("twine");
+  });
+
+  // npm is the one install channel. The formula was never kept current (the tap
+  // it targeted did not exist), so it is gone rather than left to rot.
+  test("nothing still builds, versions, or releases a Homebrew formula", () => {
+    expect(existsSync(join(ROOT, "Formula"))).toBe(false);
+    for (const file of [
+      "scripts/build.ts",
+      "scripts/set-version.ts",
+      ".github/workflows/release.yml",
+    ]) {
+      expect(read(file)).not.toMatch(/homebrew|tarball|Formula\//i);
+    }
   });
 });
 

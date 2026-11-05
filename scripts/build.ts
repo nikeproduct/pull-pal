@@ -4,29 +4,23 @@
  *
  * Runs anywhere Bun does, including Windows — there is no second shell-script
  * build path to drift out of sync (v0.1 had one, and it was the only path that
- * could produce macOS tarballs while also being the one that forgot to embed
- * the version).
+ * could produce release artifacts while also being the one that forgot to
+ * embed the version).
  *
  * Outputs:
  *   dist/                     standalone binaries, one per platform
- *   dist/tarballs/            macOS tarballs for Homebrew
  *   dist/SHA256SUMS           checksums for every release asset
  *   npm-packages/<plat>/      platform npm packages, binary in place
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PLATFORMS } from "./platforms";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "dist");
-const TARBALLS = join(DIST, "tarballs");
-const STAGING = join(DIST, ".staging");
 const SRC = join(ROOT, "src", "index.ts");
-
-/** The name the binary must have inside a Homebrew tarball. */
-const POSIX_BIN = "pull-pal";
 
 /** What each platform build produces, from the shared list in scripts/platforms.ts. */
 const TARGETS = PLATFORMS.map((p) => ({
@@ -38,8 +32,6 @@ const TARGETS = PLATFORMS.map((p) => ({
   pkgDir: p.key,
   /** Name the binary takes inside the npm package */
   pkgBin: p.bin,
-  /** Whether to produce a Homebrew tarball */
-  tarball: p.tarball,
 }));
 
 function run(cmd: string[], cwd = ROOT): { ok: boolean; stderr: string } {
@@ -63,8 +55,7 @@ writeFileSync(
 );
 console.log(`Building pull-pal ${pkg.version}\n`);
 
-rmSync(STAGING, { recursive: true, force: true });
-for (const dir of [DIST, TARBALLS, STAGING]) mkdirSync(dir, { recursive: true });
+mkdirSync(DIST, { recursive: true });
 for (const t of TARGETS) mkdirSync(join(ROOT, "npm-packages", t.pkgDir), { recursive: true });
 
 // ── Compile ────────────────────────────────────────────────────────────────
@@ -91,60 +82,14 @@ for (const t of TARGETS) {
   console.log(`  npm-packages/${t.pkgDir}/${t.pkgBin}`);
 }
 
-// ── Homebrew tarballs ──────────────────────────────────────────────────────
-//
-// The archive member MUST be named `pull-pal`, because the formula does
-// `bin.install "pull-pal"`. v0.1 tarred the platform-suffixed filename, so
-// `brew install` failed on every machine that got that far.
-console.log("\nHomebrew tarballs:");
-let tarAvailable = true;
-for (const t of TARGETS.filter((x) => x.tarball)) {
-  const stage = join(STAGING, t.out);
-  mkdirSync(stage, { recursive: true });
-  cpSync(join(DIST, t.out), join(stage, POSIX_BIN));
-
-  // Paths are kept relative and tar is run from the staging directory: GNU tar
-  // reads a leading "C:\" as a remote host spec, which breaks Windows builds.
-  const archive = `${t.out}.tar.gz`;
-  const created = run(["tar", "-czf", join("..", "..", "tarballs", archive), POSIX_BIN], stage);
-  if (!created.ok) {
-    tarAvailable = false;
-    console.warn(`  skipped ${archive} (tar unavailable: ${created.stderr.trim()})`);
-    continue;
-  }
-
-  // Verify rather than trust: this is the exact assertion v0.1 needed.
-  const listed = Bun.spawnSync(["tar", "-tzf", archive], {
-    cwd: TARBALLS,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const members = new TextDecoder()
-    .decode(listed.stdout)
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!members.includes(POSIX_BIN)) {
-    fail(
-      `${archive} must contain a member named "${POSIX_BIN}" for the Homebrew ` +
-        `formula, but contains: ${members.join(", ")}`,
-    );
-  }
-  console.log(`  ${archive}  (contains ${members.join(", ")})`);
-}
-
 // ── Checksums ──────────────────────────────────────────────────────────────
 //
 // Published with every GitHub release, so anyone downloading a binary directly
 // can verify it.
 console.log("\nSHA256SUMS:");
-const assets = [
-  ...TARGETS.map((t) => ({ path: join(DIST, t.out), name: t.out })),
-  ...TARGETS.filter((t) => t.tarball).map((t) => ({
-    path: join(TARBALLS, `${t.out}.tar.gz`),
-    name: `${t.out}.tar.gz`,
-  })),
-].filter((a) => existsSync(a.path));
+const assets = TARGETS.map((t) => ({ path: join(DIST, t.out), name: t.out })).filter((a) =>
+  existsSync(a.path),
+);
 
 const lines: string[] = [];
 for (const asset of assets) {
@@ -157,13 +102,9 @@ for (const asset of assets) {
 const sumsPath = join(DIST, "SHA256SUMS");
 writeFileSync(sumsPath, `${lines.join("\n")}\n`, "utf8");
 
-
-rmSync(STAGING, { recursive: true, force: true });
-
 console.log(`
 Done.
   binaries      ${DIST}
-  tarballs      ${TARBALLS}${tarAvailable ? "" : "  (incomplete — build on macOS/Linux for a release)"}
   checksums     ${sumsPath}
   npm packages  ${join(ROOT, "npm-packages")}
 `);

@@ -1,10 +1,10 @@
 name: Release
 
 # Manual releasing is what produced v0.1's worst distribution defects: a
-# Homebrew tap that was never created, a PyPI package that was never published,
-# and a build path that could ship a binary reporting the wrong version. Every
-# remaining channel — GitHub Releases, npm, Homebrew — is automated and verified
-# here.
+# package tap that was never created, a PyPI package that was never published,
+# and a build path that could ship a binary reporting the wrong version. npm is
+# the one install channel; it and the GitHub Release (binaries + SHA256SUMS) are
+# automated and verified here.
 
 on:
   push:
@@ -29,14 +29,10 @@ jobs:
   build:
     name: Build release artifacts
     needs: verify
-    # Built on macOS so the Homebrew tarballs are produced by the same job that
-    # publishes them, and `tar` is guaranteed present.
     runs-on: macos-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      sha_arm64: ${{ steps.hashes.outputs.arm64 }}
-      sha_x64: ${{ steps.hashes.outputs.x64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,31 +63,11 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Assert the tarballs are Homebrew-installable
-        run: |
-          set -euo pipefail
-          for arch in darwin-arm64 darwin-x64; do
-            members=$(tar -tzf "dist/tarballs/pull-pal-$arch.tar.gz")
-            if [ "$members" != "pull-pal" ]; then
-              echo "pull-pal-$arch.tar.gz must contain exactly 'pull-pal', got: $members" >&2
-              exit 1
-            fi
-          done
-
-      - name: Collect tarball hashes for the formula
-        id: hashes
-        run: |
-          set -euo pipefail
-          cd dist/tarballs
-          echo "arm64=$(shasum -a 256 pull-pal-darwin-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "x64=$(shasum -a 256 pull-pal-darwin-x64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
           path: |
             dist/pull-pal-*
-            dist/tarballs/*.tar.gz
             dist/SHA256SUMS
             npm-packages/
 
@@ -112,11 +88,13 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "$TAG" \
             --generate-notes \
-            dist/pull-pal-* dist/tarballs/*.tar.gz dist/SHA256SUMS
+            dist/pull-pal-* dist/SHA256SUMS
 
   npm:
     name: Publish to npm
-    needs: [build, github-release]
+    # Not gated on the GitHub Release: npm is the install channel, and a hiccup
+    # creating the release must not hold it back.
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,42 +116,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bun run scripts/publish-npm.ts
-
-  homebrew:
-    name: Update the Homebrew tap
-    needs: [build, github-release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # A manual run names an existing tag; build from it, not from the branch.
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Render the formula for this release
-        run: |
-          set -euo pipefail
-          sed -e "s/^  version \".*\"/  version \"${{ needs.build.outputs.version }}\"/" \
-              -e "s/REPLACED_ON_RELEASE_DARWIN_ARM64/${{ needs.build.outputs.sha_arm64 }}/" \
-              -e "s/REPLACED_ON_RELEASE_DARWIN_X64/${{ needs.build.outputs.sha_x64 }}/" \
-              Formula/pull-pal.rb > /tmp/pull-pal.rb
-          grep -q REPLACED_ON_RELEASE /tmp/pull-pal.rb && exit 1 || true
-
-      - name: Open a PR against the tap
-        env:
-          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/nikeproduct/homebrew-pull-pal.git" tap
-          cd tap
-          mkdir -p Formula
-          cp /tmp/pull-pal.rb Formula/pull-pal.rb
-          git config user.name "pull-pal release bot"
-          git config user.email "noreply@github.com"
-          git checkout -b "release-${{ needs.build.outputs.version }}"
-          git add Formula/pull-pal.rb
-          git commit -m "pull-pal ${{ needs.build.outputs.version }}"
-          git push -u origin "release-${{ needs.build.outputs.version }}"
-          gh pr create --fill --base main
 
   smoke:
     name: Install from npm (${{ matrix.os }})

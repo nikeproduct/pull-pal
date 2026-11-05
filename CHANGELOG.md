@@ -21,8 +21,11 @@ you ask it to, and several things that never worked now do.
   only on conflicts or failing tests. This is the fix for the hook leaving you
   rebased-but-unpushed; see *Fixed* below.
 - **The pip package is gone.** It was never published to PyPI, and it only
-  downloaded the same binary npm and Homebrew already ship. Use npm, Homebrew,
-  or a binary from the GitHub release.
+  downloaded the same binary npm already ships. Use npm, or a binary from the
+  GitHub release.
+- **The Homebrew formula is gone.** npm is the one install channel. The tap the
+  release targeted never existed, so `brew` installs were stuck at 0.1.3;
+  `brew uninstall pull-pal && npm install -g pull-pal` moves you over.
 - **`--no-rebase` is now `--no-sync`**, and it skips the fetch as well as the
   rebase — which is what the old flag's documentation always claimed. The old
   spelling still works and prints a deprecation notice.
@@ -76,8 +79,8 @@ you ask it to, and several things that never worked now do.
   rebase is aborted and the branch is restored exactly as it was.
 - Support for `pnpm`, `yarn`, `tox.ini`, and `setup.cfg` detection signals.
 - A `"pull-pal": { "test": "..." }` escape hatch in package.json.
-- Release automation: one tag builds, verifies, and publishes to GitHub
-  Releases, npm, and the Homebrew tap, then installs from npm on Linux (x64 and
+- Release automation: one tag builds, verifies, and publishes to npm and GitHub
+  Releases, then installs from npm on Linux (x64 and
   arm64), macOS, and Windows to prove the release is usable.
 - A LICENSE file (MIT), which the manifests had always claimed.
 
@@ -169,9 +172,6 @@ you ask it to, and several things that never worked now do.
 - Failures were reported as success: an undeterminable default branch printed
   "✓ Up to date".
 - Git's ref list on stdin could be consumed by the test runner in hook mode.
-- The Homebrew tarballs contained a platform-suffixed binary while the formula
-  installed `pull-pal`, so `brew install` could never succeed. The build now
-  asserts the archive member name.
 - `build.sh` did not regenerate the embedded version, so a release cut with it
   shipped binaries reporting the wrong version. There is now one build path, and
   `check-version` verifies the generated file.
